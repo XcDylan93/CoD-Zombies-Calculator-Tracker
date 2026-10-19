@@ -1,6 +1,6 @@
 # Zombies Tracker & Calculator
 
-A feature-packed desktop utility designed for Call of Duty Zombies players and modders to calculate round stats, track powerups, manage GobbleGum packs, and calculate round/boss/bonus intervals.
+A feature-packed desktop utility designed for Call of Duty Zombies players to calculate round stats, track powerups, manage GobbleGum packs, and calculate round/boss/bonus intervals.
 
 ## Features
 * **Zombie Round Stats & Health Calculator:** Supports both Standard and Modern game modes with player count scaling, horde breakdown (24 zombies/horde), and cumulative stats.
