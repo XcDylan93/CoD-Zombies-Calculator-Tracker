@@ -97,7 +97,6 @@ class MemoryReader:
           
           ACCESS_RIGHTS = PROCESS_VM_READ | PROCESS_QUERY_INFORMATION
           
-          # ADD THIS LINE:
           print(f"[DEBUG] Requesting OpenProcess with access mask: 0x{ACCESS_RIGHTS:X}")
           
           self.h_process = self.kernel32.OpenProcess(
