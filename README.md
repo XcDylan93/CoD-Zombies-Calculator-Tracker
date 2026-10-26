@@ -11,4 +11,4 @@ A feature-packed desktop utility designed for Call of Duty Zombies players to ca
 * **Auto-Update Checker:** Automatically checks for new releases on startup.
 
 ## Download & Installation
-Head over to the [Releases](../../releases) page to download zombacus.zip
+Head over to the [Releases](../../releases) page to download zombacus.exe
