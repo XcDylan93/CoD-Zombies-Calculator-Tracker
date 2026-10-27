@@ -17,7 +17,14 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from PIL import Image, ImageTk
 
-APP_VERSION = "1.0.10"
+APP_VERSION = "1.1.2"
+
+if getattr(sys, "frozen", False):
+  base_dir = os.path.dirname(os.path.abspath(sys.executable))
+else:
+  base_dir = os.path.dirname(os.path.abspath(__file__))
+
+CONFIG_FILE = os.path.join(base_dir, "zombacus_config.json")
 
 def resource_path(relative_path):
   try:
@@ -232,21 +239,28 @@ class ZombiesTrackerApp:
     self.root.geometry("800x800")
     self.root.configure(bg="#1e1e1e")
 
-    self.accent_rgb = [0, 122, 204]
+    self.is_loading_config = True
+    self.user_changed_round_manually = False
 
+    self.accent_rgb = [0, 122, 204]
     self.config_data = {}
     self.selected_gums = [None, None, None, None, None]
-    if os.path.exists("zombacus_config.json"):
-      try:
-        with open("zombacus_config.json", "r") as f:
-          self.config_data = json.load(f)
-          saved_gums = self.config_data.get("selected_gums")
-          if saved_gums and isinstance(saved_gums, list):
-            while len(saved_gums) < 5:
-              saved_gums.append(None)
-            self.selected_gums = saved_gums[:5]
-      except Exception as e:
-        print(f"Could not pre-load config: {e}")
+    self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    self.root.bind("<Control-g>", self.toggle_game_mode_hotkey)
+
+    self.gm_show_calc_zombies = tk.BooleanVar(value=True)
+    self.gm_show_calc_hordes = tk.BooleanVar(value=False)
+    self.gm_show_calc_health = tk.BooleanVar(value=False)
+    self.gm_show_gums = tk.BooleanVar(value=False)
+    self.gm_show_powerups = tk.BooleanVar(value=False)
+    self.gm_show_bonus = tk.BooleanVar(value=False)
+    self.gm_show_boss = tk.BooleanVar(value=False)
+    self.gm_show_errors = tk.BooleanVar(value=False)
+    self.sr_show_sph = tk.BooleanVar(value=False)
+    self.gm_show_splits = tk.BooleanVar(value=True)
+    self.gm_show_timer = tk.BooleanVar(value=True)
+    self.sr_topmost_var = tk.BooleanVar(value=False)
 
     try:
       icon_path = resource_path("app_icon.ico")
@@ -431,6 +445,7 @@ class ZombiesTrackerApp:
 
     self.accent_buttons = []
     self.accent_text_labels = []
+    self.tab_buttons = []
 
     self.credit_lbl = tk.Label(
         root,
@@ -472,8 +487,6 @@ class ZombiesTrackerApp:
     self.setup_boss_tab()
     self.setup_speedrun_tab()
     self.setup_error_tracker_tab()
-
-    self.tab_buttons = []
 
     btn_z = tk.Button(
         self.tab_bar,
@@ -524,16 +537,81 @@ class ZombiesTrackerApp:
     self.calculate_bonus_round()
     self.calculate_boss_round()
 
+    threading.Thread(target=self.game_round_auto_detect_loop, daemon=True).start()
+
     self.root.after(1000, self.check_for_updates)
     self.start_timer_loop()
     self.load_config()
+    self.is_loading_config = False
+
+  def on_closing(self):
+    self.save_config()
+    self.root.destroy()
+
+  def create_tab_header_panel(self, parent, specific_toggles=None):
+    panel = tk.Frame(parent, bg="#222223", bd=1, relief="solid", padx=12, pady=8)
+    panel.pack(padx=20, pady=5, fill="x")
+
+    gm_chk = tk.Checkbutton(
+        panel,
+        text="Enter Game Mode [Ctrl+G]",
+        variable=self.sr_topmost_var,
+        command=self.toggle_always_on_top,
+        font=("Segoe UI", 9, "bold"),
+        fg="#55ff55",
+        bg="#222223",
+        selectcolor="#333333",
+        activebackground="#222223",
+        activeforeground="#ffffff",
+    )
+    gm_chk.pack(side="left", padx=(0, 10))
+
+    if specific_toggles:
+      sep = tk.Frame(panel, bg="#444444", width=1, height=18)
+      sep.pack(side="left", padx=5, fill="y")
+      
+      lbl_desc = tk.Label(
+          panel,
+          text="Show in Overlay:",
+          font=("Segoe UI", 8, "italic"),
+          fg="#888888",
+          bg="#222223",
+      )
+      lbl_desc.pack(side="left", padx=(5, 6))
+
+      for text, var in specific_toggles:
+        chk = tk.Checkbutton(
+            panel,
+            text=text,
+            variable=var,
+            command=self.on_gm_option_changed,
+            font=("Segoe UI", 8, "bold"),
+            fg="#00d2ff",
+            bg="#222223",
+            selectcolor="#333333",
+            activebackground="#222223",
+            activeforeground="#ffffff",
+        )
+        chk.pack(side="left", padx=6)
+
+    return panel
 
   def save_config(self):
+    if getattr(self, "is_loading_config", False):
+      return
     config = {
         "lss_path": getattr(self, "loaded_lss_path", ""),
         "asl_path": getattr(self, "loaded_asl_path", ""),
         "timer_font": getattr(self, "timer_font_var", tk.StringVar(value="Consolas")).get(),
+        "gm_calc_zombies": getattr(self, "gm_show_calc_zombies", tk.BooleanVar(value=True)).get(),
+        "gm_calc_hordes": getattr(self, "gm_show_calc_hordes", tk.BooleanVar(value=False)).get(),
+        "gm_calc_health": getattr(self, "gm_show_calc_health", tk.BooleanVar(value=False)).get(),
         "selected_gums": getattr(self, "selected_gums", [None, None, None, None, None]),
+        "powerup_states": getattr(self, "powerup_states", {}),
+        "gum_tracker_states": getattr(self, "gum_tracker_states", {}),
+        "optional_powerups": {name: var.get() for name, var in getattr(self, "optional_vars", {}).items()},
+        "gm_splits": getattr(self, "gm_show_splits", tk.BooleanVar(value=True)).get(),
+        "gm_timer": getattr(self, "gm_show_timer", tk.BooleanVar(value=True)).get(),
         "gm_gums": getattr(self, "gm_show_gums", tk.BooleanVar(value=False)).get(),
         "gm_powerups": getattr(self, "gm_show_powerups", tk.BooleanVar(value=False)).get(),
         "gm_bonus": getattr(self, "gm_show_bonus", tk.BooleanVar(value=False)).get(),
@@ -551,117 +629,164 @@ class ZombiesTrackerApp:
         "enabled_errors": {item["key"]: item["enabled"] for item in getattr(self, "error_addresses_def", [])},
     }
     try:
-      with open("zombacus_config.json", "w") as f:
-        json.dump(config, f)
+      with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=4)
+      print(f"[Config] Successfully saved config to {CONFIG_FILE}")
     except Exception as e:
-      print(f"Could not save config: {e}")
+      print(f"[Config] Could not save config: {e}")
 
   def load_config(self):
-    if os.path.exists("zombacus_config.json"):
-      try:
-        with open("zombacus_config.json", "r") as f:
-          config = json.load(f)
-          
-          lss_path = config.get("lss_path")
-          if lss_path and os.path.exists(lss_path):
-            self.load_lss_splits_file(lss_path)
+    self.is_loading_config = True
+    self.config_data = {}
+    self.selected_gums = [None, None, None, None, None]
 
-          asl_path = config.get("asl_path")
-          if asl_path and os.path.exists(asl_path):
-            self.load_asl_script(asl_path)
+    if not os.path.exists(CONFIG_FILE):
+      return
 
-          timer_font = config.get("timer_font")
-          if timer_font and hasattr(self, "timer_font_var"):
-            self.timer_font_var.set(timer_font)
-            self.update_timer_font()
+    try:
+      with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        config = json.load(f)
+        self.config_data = config
 
-          sr_sph = config.get("sr_show_sph")
-          if sr_sph is not None and hasattr(self, "sr_show_sph"):
-            self.sr_show_sph.set(sr_sph)
+        saved_gums = config.get("selected_gums")
+        if saved_gums and isinstance(saved_gums, list):
+          while len(saved_gums) < 5:
+            saved_gums.append(None)
+          self.selected_gums = saved_gums[:5]
 
-          hue = config.get("accent_hue")
-          sat = config.get("accent_sat")
-          light = config.get("accent_light")
-          
-          if hue is not None and hasattr(self, "hue_slider"):
-            self.hue_slider.set(hue)
-          if sat is not None and hasattr(self, "sat_slider"):
-            self.sat_slider.set(sat)
-          if light is not None and hasattr(self, "light_slider"):
-            self.light_slider.set(light)
-            
-          if hue is not None:
-            self.update_accent_from_hue()
+        lss_path = config.get("lss_path")
+        if lss_path and os.path.exists(lss_path):
+          self.load_lss_splits_file(lss_path)
 
-          if hasattr(self, "gm_show_gums"):
-            self.gm_show_gums.set(config.get("gm_gums", False))
-          if hasattr(self, "gm_show_powerups"):
-            self.gm_show_powerups.set(config.get("gm_powerups", False))
-          if hasattr(self, "gm_show_bonus"):
-            self.gm_show_bonus.set(config.get("gm_bonus", False))
-          if hasattr(self, "gm_show_boss"):
-            self.gm_show_boss.set(config.get("gm_boss", False))
-          if hasattr(self, "gm_show_errors"):
-            self.gm_show_errors.set(config.get("gm_errors", False))
+        asl_path = config.get("asl_path")
+        if asl_path and os.path.exists(asl_path):
+          self.load_asl_script(asl_path)
 
-          bp = config.get("bonus_preset")
-          if bp and hasattr(self, "bonus_preset_combo"):
-            self.bonus_preset_combo.set(bp)
-            self.on_bonus_preset_selected(None)
-          br = config.get("bonus_round")
-          if br and hasattr(self, "bonus_entry"):
-            self.bonus_entry.delete(0, tk.END)
-            self.bonus_entry.insert(0, br)
-          el = config.get("excavator_loc")
-          if el and hasattr(self, "selected_excavator_location"):
-            self.selected_excavator_location = el
-            self.update_excavator_buttons_ui()
+        timer_font = config.get("timer_font")
+        if timer_font and hasattr(self, "timer_font_var"):
+          self.timer_font_var.set(timer_font)
+          self.update_timer_font()
 
-          bsp = config.get("boss_preset")
-          if bsp and hasattr(self, "boss_preset_combo"):
-            self.boss_preset_combo.set(bsp)
-            self.on_boss_preset_selected(None)
-          bsr = config.get("boss_round")
-          if bsr and hasattr(self, "boss_entry"):
-            self.boss_entry.delete(0, tk.END)
-            self.boss_entry.insert(0, bsr)
+        sr_sph = config.get("sr_show_sph")
+        if sr_sph is not None and hasattr(self, "sr_show_sph"):
+          self.sr_show_sph.set(bool(sr_sph))
 
-          self.calculate_bonus_round()
-          self.calculate_boss_round()
+        hue = config.get("accent_hue")
+        sat = config.get("accent_sat")
+        light = config.get("accent_light")
 
-          enabled_errors = config.get("enabled_errors", {})
-          if enabled_errors and hasattr(self, "error_addresses_def"):
+        if hue is not None and hasattr(self, "hue_slider"):
+          self.hue_slider.set(hue)
+        if sat is not None and hasattr(self, "sat_slider"):
+          self.sat_slider.set(sat)
+        if light is not None and hasattr(self, "light_slider"):
+          self.light_slider.set(light)
+
+        if hue is not None:
+          self.update_accent_from_hue()
+
+        if hasattr(self, "gm_show_calc_zombies"):
+          self.gm_show_calc_zombies.set(bool(config.get("gm_calc_zombies", True)))
+        if hasattr(self, "gm_show_calc_hordes"):
+          self.gm_show_calc_hordes.set(bool(config.get("gm_calc_hordes", False)))
+        if hasattr(self, "gm_show_calc_health"):
+          self.gm_show_calc_health.set(bool(config.get("gm_calc_health", False)))
+
+        if hasattr(self, "gm_show_splits"):
+          self.gm_show_splits.set(bool(config.get("gm_splits", True)))
+        if hasattr(self, "gm_show_timer"):
+          self.gm_show_timer.set(bool(config.get("gm_timer", True)))
+        if hasattr(self, "gm_show_gums"):
+          self.gm_show_gums.set(bool(config.get("gm_gums", False)))
+        if hasattr(self, "gm_show_powerups"):
+          self.gm_show_powerups.set(bool(config.get("gm_powerups", False)))
+        if hasattr(self, "gm_show_bonus"):
+          self.gm_show_bonus.set(bool(config.get("gm_bonus", False)))
+        if hasattr(self, "gm_show_boss"):
+          self.gm_show_boss.set(bool(config.get("gm_boss", False)))
+        if hasattr(self, "gm_show_errors"):
+          self.gm_show_errors.set(bool(config.get("gm_errors", False)))
+
+        bp = config.get("bonus_preset")
+        if bp and hasattr(self, "bonus_preset_combo"):
+          self.bonus_preset_combo.set(bp)
+          self.on_bonus_preset_selected(None)
+        br = config.get("bonus_round")
+        if br is not None and hasattr(self, "bonus_entry"):
+          self.bonus_entry.delete(0, tk.END)
+          self.bonus_entry.insert(0, str(br))
+        el = config.get("excavator_loc")
+        if el and hasattr(self, "selected_excavator_location"):
+          self.selected_excavator_location = el
+          self.update_excavator_buttons_ui()
+
+        bsp = config.get("boss_preset")
+        if bsp and hasattr(self, "boss_preset_combo"):
+          self.boss_preset_combo.set(bsp)
+          self.on_boss_preset_selected(None)
+        bsr = config.get("boss_round")
+        if bsr is not None and hasattr(self, "boss_entry"):
+          self.boss_entry.delete(0, tk.END)
+          self.boss_entry.insert(0, str(bsr))
+
+        self.calculate_bonus_round()
+        self.calculate_boss_round()
+
+        enabled_errors = config.get("enabled_errors", {})
+        if enabled_errors and hasattr(self, "error_addresses_def"):
+          for item in self.error_addresses_def:
+            if item["key"] in enabled_errors:
+              item["enabled"] = bool(enabled_errors[item["key"]])
+          if hasattr(self, "et_item_ids") and hasattr(self, "et_tree"):
             for item in self.error_addresses_def:
-              if item["key"] in enabled_errors:
-                item["enabled"] = bool(enabled_errors[item["key"]])
-            if hasattr(self, "et_item_ids") and hasattr(self, "et_tree"):
-              for item in self.error_addresses_def:
-                key = item["key"]
-                if key in self.et_item_ids:
-                  tid = self.et_item_ids[key]
-                  checkbox_symbol = "☑" if item["enabled"] else "☐"
-                  current_vals = self.et_tree.item(tid, "values")
-                  if current_vals:
-                    self.et_tree.item(
-                        tid,
-                        values=(
-                            checkbox_symbol,
-                            current_vals[1],
-                            current_vals[2],
-                            current_vals[3],
-                        ),
-                    )
+              key = item["key"]
+              if key in self.et_item_ids:
+                tid = self.et_item_ids[key]
+                checkbox_symbol = "☑" if item["enabled"] else "☐"
+                current_vals = self.et_tree.item(tid, "values")
+                if current_vals and len(current_vals) >= 4:
+                  self.et_tree.item(
+                      tid,
+                      values=(
+                          checkbox_symbol,
+                          current_vals[1],
+                          current_vals[2],
+                          current_vals[3],
+                      ),
+                  )
 
-          saved_gums = config.get("selected_gums")
-          if saved_gums and isinstance(saved_gums, list):
-            while len(saved_gums) < 5:
-              saved_gums.append(None)
-            self.selected_gums = saved_gums[:5]
-            self.update_gum_ui()
-            self.rebuild_gum_tracker_grid()
+        saved_powerups = config.get("powerup_states", {})
+        if saved_powerups and isinstance(saved_powerups, dict):
+          for k, v in saved_powerups.items():
+            if k in self.powerup_states:
+              self.powerup_states[k] = bool(v)
+          self.update_powerup_ui()
 
-      except Exception as e:
-        print(f"Could not load config: {e}")
+        saved_gum_states = config.get("gum_tracker_states", {})
+        if saved_gum_states and isinstance(saved_gum_states, dict):
+          for k, v in saved_gum_states.items():
+            self.gum_tracker_states[k] = bool(v)
+
+        saved_optional = config.get("optional_powerups", {})
+        if saved_optional and isinstance(saved_optional, dict) and hasattr(self, "optional_vars"):
+          for k, v in saved_optional.items():
+            if k in self.optional_vars:
+              self.optional_vars[k].set(bool(v))
+          self.update_optional_toggle_ui()
+          self.rebuild_powerup_grid()
+
+        self.update_gum_ui()
+        self.rebuild_gum_tracker_grid()
+        print(f"[Config] Successfully loaded config from {CONFIG_FILE}")
+
+    except json.JSONDecodeError as jde:
+      print(f"[Config] Corrupted config file encountered: {jde}. Backing up and resetting.")
+      try:
+        os.rename(CONFIG_FILE, CONFIG_FILE + "_corrupt.json")
+      except Exception:
+        pass
+    except Exception as e:
+      print(f"[Config] Could not load config: {e}")
 
   def show_page(self, page_index):
     self.current_page_index = page_index
@@ -715,12 +840,13 @@ class ZombiesTrackerApp:
       if lbl.winfo_exists():
         lbl.config(fg=hex_c)
 
-    active_idx = getattr(self, "current_page_index", 0)
-    for idx, btn in enumerate(self.tab_buttons):
-      if idx == active_idx:
-        btn.config(bg=hex_c)
-      else:
-        btn.config(bg="#2d2d2d")
+    if hasattr(self, "tab_buttons") and self.tab_buttons:
+      active_idx = getattr(self, "current_page_index", 0)
+      for idx, btn in enumerate(self.tab_buttons):
+        if idx == active_idx:
+          btn.config(bg=hex_c)
+        else:
+          btn.config(bg="#2d2d2d")
 
     self.save_config()
 
@@ -778,14 +904,14 @@ class ZombiesTrackerApp:
         return
 
       app_dir = os.path.dirname(current_exe_path)
-      zip_path = os.path.join(app_dir, "update.zip")
+      new_exe_path = os.path.join(app_dir, "update_new.exe")
       bat_path = os.path.join(app_dir, "update.bat")
 
       messagebox.showinfo(
           "Downloading",
-          "Downloading update package... The application will restart automatically.",
+          "Downloading update... The application will restart automatically.",
       )
-      urllib.request.urlretrieve(download_url, zip_path)
+      urllib.request.urlretrieve(download_url, new_exe_path)
 
       bat_content = f"""@echo off
       chcp 65001 >nul
@@ -793,11 +919,8 @@ class ZombiesTrackerApp:
       taskkill /IM "{exe_filename}" /F > NUL 2>&1
       timeout /t 3 /nobreak > NUL
       
-      echo Extracting update...
-      powershell -Command "$temp = Join-Path '{app_dir}' 'temp_update'; Expand-Archive -Path '{zip_path}' -DestinationPath $temp -Force; if (Test-Path (Join-Path $temp 'zombacus')) {{ Move-Item -Path '$temp\\zombacus\\*' -Destination '{app_dir}' -Force; Remove-Item '$temp\\zombacus' -Recurse }} else {{ Move-Item -Path '$temp\\*' -Destination '{app_dir}' -Force }}; Remove-Item $temp -Recurse -Force"
-      
-      echo Cleaning up...
-      del "{zip_path}"
+      echo Applying update...
+      move /y "{new_exe_path}" "{current_exe_path}"
       
       echo Restarting application...
       start "" "{current_exe_path}"
@@ -851,12 +974,14 @@ class ZombiesTrackerApp:
 
   def load_powerup_icons(self):
     self.loaded_images = {}
+    self.loaded_small_images = {}
     self.loaded_pil_images = {}
     for name, filename in self.icon_filenames.items():
       path = resource_path(filename)
       if os.path.exists(path):
         try:
           self.loaded_images[name] = self.load_clean_transparent_icon(path, (64, 64))
+          self.loaded_small_images[name] = self.load_uniform_small_icon(path, (28, 28))
           img = Image.open(path).convert("RGBA")
           bbox = img.getbbox()
           if bbox:
@@ -864,6 +989,26 @@ class ZombiesTrackerApp:
           self.loaded_pil_images[name] = img
         except Exception as e:
           print(f"Could not load image {filename}: {e}")
+
+  def load_uniform_small_icon(self, path, max_size):
+    img = Image.open(path).convert("RGBA")
+    orig_w, orig_h = img.size
+    max_w, max_h = max_size
+
+    if orig_w > orig_h:
+      icon_w = max_w
+      icon_h = int(orig_h * (max_w / orig_w))
+    else:
+      icon_h = max_h
+      icon_w = int(orig_w * (max_h / orig_h))
+
+    img = img.resize((icon_w, icon_h), Image.Resampling.LANCZOS)
+    container = Image.new("RGBA", max_size, (0, 0, 0, 0))
+    paste_x = (max_w - icon_w) // 2
+    paste_y = (max_h - icon_h) // 2
+    container.paste(img, (paste_x, paste_y), img)
+
+    return ImageTk.PhotoImage(container)
 
   def load_gum_icons(self):
     self.gum_loaded_images = {}
@@ -944,6 +1089,18 @@ class ZombiesTrackerApp:
     final_img.paste(badge, (0, 0), badge)
 
     return ImageTk.PhotoImage(final_img)
+
+  def create_row_gradient_image(self, width, height, start_rgb, end_rgb):
+    img = Image.new("RGB", (max(10, width), height))
+    for x in range(width):
+      factor = x / max(1, width - 1)
+      factor_e = factor * factor
+      r = int(start_rgb[0] + (end_rgb[0] - start_rgb[0]) * factor_e)
+      g = int(start_rgb[1] + (end_rgb[1] - start_rgb[1]) * factor_e)
+      b = int(start_rgb[2] + (end_rgb[2] - start_rgb[2]) * factor_e)
+      for y in range(height):
+        img.putpixel((x, y), (r, g, b))
+    return ImageTk.PhotoImage(img)
 
   def create_hue_picker(self, parent_frame):
     picker_frame = tk.LabelFrame(
@@ -1102,6 +1259,15 @@ class ZombiesTrackerApp:
     title_lbl.pack(pady=(12, 5))
     self.accent_text_labels.append(title_lbl)
 
+    self.create_tab_header_panel(
+        self.calc_frame,
+        [
+            ("Zombies", self.gm_show_calc_zombies),
+            ("Hordes", self.gm_show_calc_hordes),
+            ("Health", self.gm_show_calc_health),
+        ],
+    )
+
     self.create_hue_picker(self.calc_frame)
 
     input_frame = tk.Frame(self.calc_frame, bg="#252526", padx=15, pady=15)
@@ -1158,7 +1324,13 @@ class ZombiesTrackerApp:
     )
     self.round_entry.insert(0, "1")
     self.round_entry.pack(side="left", padx=2)
-    self.round_entry.bind("<Return>", lambda event: self.calculate_zombies())
+    self.round_entry.bind(
+        "<Return>",
+        lambda event: [
+            setattr(self, "user_changed_round_manually", True),
+            self.calculate_zombies(),
+        ],
+    )
 
     self.btn_plus = tk.Button(
         round_ctrl_frame,
@@ -1844,6 +2016,7 @@ class ZombiesTrackerApp:
     self.calculate_combined_time()
 
   def increment_round(self):
+    self.user_changed_round_manually = True
     try:
       val = int(self.round_entry.get())
     except ValueError:
@@ -1853,11 +2026,12 @@ class ZombiesTrackerApp:
     self.calculate_zombies()
 
   def decrement_round(self):
+    self.user_changed_round_manually = True
     try:
       val = int(self.round_entry.get())
     except ValueError:
-      val = 2
-    if val > 1:
+      val = 1
+    if val > 0:
       self.round_entry.delete(0, tk.END)
       self.round_entry.insert(0, str(val - 1))
       self.calculate_zombies()
@@ -1983,6 +2157,7 @@ class ZombiesTrackerApp:
     self.calculate_sph()
     self.calculate_round_time()
     self.calculate_combined_time()
+    self.refresh_gm_if_active()
 
   def calculate_sph(self):
     try:
@@ -1997,7 +2172,11 @@ class ZombiesTrackerApp:
     try:
       round_num = int(self.round_entry.get())
       players = int(self.players_spin.get())
-      zombies = self.get_zombies_for_round(round_num, players)
+      preset = self.calc_preset_combo.get()
+      if preset == "Modern":
+        zombies = self.get_modern_zombies_for_round(round_num, players)
+      else:
+        zombies = self.get_standard_zombies_for_round(round_num, players)
       hordes = zombies / 24.0
     except Exception:
       hordes = 0.0
@@ -2169,103 +2348,186 @@ class ZombiesTrackerApp:
     return max_val
 
   def setup_powerup_tab(self):
-    title_lbl = tk.Label(
-        self.power_frame,
-        text="Powerup Tracker",
-        font=("Death Spirit", 16),
-        fg="#ff5555",
-        bg="#1e1e1e",
-    )
-    title_lbl.pack(pady=15)
-    self.accent_text_labels.append(title_lbl)
-
-    options_frame = tk.LabelFrame(
-        self.power_frame,
-        text=" Optional Powerup Toggles ",
-        font=("Segoe UI", 10, "bold"),
-        fg="#ff5555",
-        bg="#252526",
-        bd=1,
-        relief="solid",
-    )
-    options_frame.pack(padx=20, fill="x", pady=10)
-
-    self.optional_vars = {
-        "Carpenter": tk.BooleanVar(value=False),
-        "Fire Sale": tk.BooleanVar(value=False),
-        "Death Machine": tk.BooleanVar(value=False),
-        "Zombie Blood": tk.BooleanVar(value=False),
-    }
-
-    opt_sub_frame = tk.Frame(options_frame, bg="#252526")
-    opt_sub_frame.pack(padx=10, pady=6, fill="x")
-
-    col_idx = 0
-    for name, var in self.optional_vars.items():
-      chk = tk.Checkbutton(
-          opt_sub_frame,
-          text=name,
-          variable=var,
-          command=self.rebuild_powerup_grid,
-          font=("Segoe UI", 9),
-          fg="#ffffff",
-          bg="#252526",
-          selectcolor="#333333",
-          activebackground="#252526",
-          activeforeground="#ffffff",
-      )
-      chk.grid(row=0, column=col_idx, sticky="w", padx=10)
-      col_idx += 1
-
-    status_frame = tk.Frame(self.power_frame, bg="#252526", padx=15, pady=8)
-    status_frame.pack(padx=20, fill="x", pady=8)
-
-    self.powerup_states = {
-        "Max Ammo": False,
-        "Insta-Kill": False,
-        "Double Points": False,
-        "Nuke": False,
-        "Carpenter": False,
-        "Fire Sale": False,
-        "Death Machine": False,
-        "Zombie Blood": False,
-    }
-
-    self.status_lbl = tk.Label(
-        status_frame,
-        text="Selected: 0 / 0",
-        font=("Segoe UI", 11, "bold"),
-        fg=self.get_accent_hex(),
-        bg="#252526",
-    )
-    self.status_lbl.pack(side="left", pady=2)
-    self.accent_text_labels.append(self.status_lbl)
-
-    reset_btn = tk.Button(
-        status_frame,
-        text="Manual Reset",
-        command=self.reset_powerups,
-        font=("Segoe UI", 9),
-        bg="#333333",
-        fg="#ffffff",
-        relief="flat",
-        padx=8,
-    )
-    reset_btn.pack(side="right", pady=2)
-
-    self.grid_container = tk.Frame(
-        self.power_frame, bg="#1e1e1e", padx=5, pady=5
-    )
-    self.grid_container.pack(padx=10, fill="both", expand=True)
+    for widget in self.power_frame.winfo_children():
+      widget.destroy()
 
     self.card_frames = {}
     self.card_labels = {}
     self.card_icon_labels = {}
+
+    if not hasattr(self, "powerup_states"):
+      self.powerup_states = {
+          "Max Ammo": False,
+          "Insta-Kill": False,
+          "Double Points": False,
+          "Nuke": False,
+          "Carpenter": False,
+          "Fire Sale": False,
+          "Death Machine": False,
+          "Zombie Blood": False,
+      }
+
+    title_lbl = tk.Label(
+        self.power_frame,
+        text="POWERUP TRACKER",
+        font=("Death Spirit", 16),
+        fg="#ff3333",
+        bg="#1e1e1e",
+    )
+    title_lbl.pack(pady=(10, 15))
+    self.accent_text_labels.append(title_lbl)
+
+    self.create_tab_header_panel(
+        self.power_frame,
+        [("Powerup Tracker", self.gm_show_powerups)],
+    )
+
+    opt_outer_frame = tk.LabelFrame(
+        self.power_frame,
+        text="Optional Powerup Toggles",
+        font=("Segoe UI", 10, "bold"),
+        fg="#ff6666",
+        bg="#1e1e1e",
+        bd=1,
+        relief="solid",
+    )
+    opt_outer_frame.pack(fill="x", padx=15, pady=(0, 15), ipadx=5, ipady=5)
+
+    inner_opt_frame = tk.Frame(opt_outer_frame, bg="#1e1e1e")
+    inner_opt_frame.pack(anchor="center", pady=4)
+
+    if not hasattr(self, "optional_vars"):
+      self.optional_vars = {
+          "Carpenter": tk.BooleanVar(value=True),
+          "Fire Sale": tk.BooleanVar(value=True),
+          "Death Machine": tk.BooleanVar(value=False),
+          "Zombie Blood": tk.BooleanVar(value=False),
+      }
+
+    self.optional_card_frames = {}
+    self.optional_card_labels = {}
+    self.optional_card_icon_labels = {}
+
+    def make_toggle_handler(p_name, p_var):
+      def handler(event=None):
+        p_var.set(not p_var.get())
+        self.update_optional_toggle_ui()
+        self.rebuild_powerup_grid()
+        self.save_config()
+      return handler
+
+    for name, var in self.optional_vars.items():
+      card = tk.Frame(
+          inner_opt_frame,
+          bg="#2d2d2d",
+          bd=1,
+          relief="solid",
+          width=96,
+          height=78,
+      )
+      card.grid_propagate(False)
+      card.pack_propagate(False)
+      card.pack(side="left", padx=6, pady=2)
+      card.bind("<Button-1>", make_toggle_handler(name, var))
+
+      self.optional_card_frames[name] = card
+
+      img = self.load_uniform_small_icon(resource_path(self.icon_filenames[name]), (42, 42))
+      if img:
+        if not hasattr(self, "temp_opt_images"):
+          self.temp_opt_images = {}
+        self.temp_opt_images[name] = img
+        
+        icon_lbl = tk.Label(card, image=img, bg="#2d2d2d", bd=0, highlightthickness=0)
+        icon_lbl.pack(pady=(6, 2))
+        icon_lbl.bind("<Button-1>", make_toggle_handler(name, var))
+        self.optional_card_icon_labels[name] = icon_lbl
+
+      lbl = tk.Label(
+          card,
+          text=name,
+          font=("Segoe UI", 8, "bold"),
+          fg="#ffffff",
+          bg="#2d2d2d",
+          justify="center",
+          wraplength=90,
+      )
+      lbl.pack(pady=(0, 4))
+      lbl.bind("<Button-1>", make_toggle_handler(name, var))
+      
+      self.optional_card_labels[name] = lbl
+
+    self.update_optional_toggle_ui()
+
+    grid_outer_frame = tk.LabelFrame(
+        self.power_frame,
+        text="Powerup Tracker Grid",
+        font=("Segoe UI", 10, "bold"),
+        fg="#ff6666",
+        bg="#1e1e1e",
+        bd=1,
+        relief="solid",
+    )
+    grid_outer_frame.pack(fill="both", expand=True, padx=15, pady=(0, 15), ipadx=5, ipady=5)
+
+    top_bar = tk.Frame(grid_outer_frame, bg="#1e1e1e")
+    top_bar.pack(fill="x", padx=10, pady=8)
+
+    self.powerup_counter_lbl = tk.Label(
+        top_bar,
+        text="Selected: 0 / 5",
+        font=("Segoe UI", 10, "bold"),
+        fg="#00aaff",
+        bg="#1e1e1e",
+    )
+    self.powerup_counter_lbl.pack(side="left")
+    
+    self.status_lbl = self.powerup_counter_lbl
+
+    reset_btn = tk.Button(
+        top_bar,
+        text="Manual Reset",
+        font=("Segoe UI", 9),
+        bg="#2d2d2d",
+        fg="#ffffff",
+        activebackground="#3d3d3d",
+        activeforeground="#ffffff",
+        relief="raised",
+        bd=1,
+        command=self.reset_powerups,
+    )
+    reset_btn.pack(side="right")
+
+    self.powerup_grid_container = tk.Frame(grid_outer_frame, bg="#1e1e1e")
+    self.powerup_grid_container.pack(fill="both", expand=True, padx=10, pady=5)
+
     self.rebuild_powerup_grid()
 
+  def update_optional_toggle_ui(self):
+    for name, var in self.optional_vars.items():
+      card = self.optional_card_frames.get(name)
+      lbl = self.optional_card_labels.get(name)
+      icon_lbl = self.optional_card_icon_labels.get(name)
+
+      bg_col = self.get_accent_hex() if var.get() else "#2d2d2d"
+
+      if card:
+        card.config(bg=bg_col)
+      if lbl:
+        lbl.config(bg=bg_col)
+      if icon_lbl:
+        icon_lbl.config(bg=bg_col)
+
   def rebuild_powerup_grid(self):
-    for widget in self.grid_container.winfo_children():
+    for widget in self.powerup_grid_container.winfo_children():
       widget.destroy()
+
+    if not hasattr(self, "card_frames"):
+      self.card_frames = {}
+    if not hasattr(self, "card_labels"):
+      self.card_labels = {}
+    if not hasattr(self, "card_icon_labels"):
+      self.card_icon_labels = {}
 
     self.card_frames.clear()
     self.card_labels.clear()
@@ -2277,14 +2539,14 @@ class ZombiesTrackerApp:
         active_powerups.append(opt_name)
 
     for col in range(4):
-      self.grid_container.grid_columnconfigure(col, weight=1, uniform="equal")
+      self.powerup_grid_container.grid_columnconfigure(col, weight=1, uniform="equal")
 
     for i, name in enumerate(active_powerups):
       row = i // 4
       col = i % 4
 
       card = tk.Frame(
-          self.grid_container,
+          self.powerup_grid_container,
           bg="#2d2d2d",
           bd=2,
           relief="groove",
@@ -2332,6 +2594,7 @@ class ZombiesTrackerApp:
   def toggle_powerup(self, name):
     self.powerup_states[name] = not self.powerup_states[name]
     self.update_powerup_ui()
+    self.save_config()
 
     enabled_powerups = ["Max Ammo", "Insta-Kill", "Double Points", "Nuke"]
     for opt_name, var in self.optional_vars.items():
@@ -2400,6 +2663,11 @@ class ZombiesTrackerApp:
     )
     title_lbl.pack(pady=15)
     self.accent_text_labels.append(title_lbl)
+
+    self.create_tab_header_panel(
+        self.bonus_frame,
+        [("Bonus Tracker", self.gm_show_bonus)],
+    )
 
     input_frame = tk.Frame(self.bonus_frame, bg="#252526", padx=15, pady=15)
     input_frame.pack(padx=20, fill="x")
@@ -2520,13 +2788,14 @@ class ZombiesTrackerApp:
     self.bonus_plus_btn.pack(side="left", padx=(5, 0))
     self.accent_buttons.append(self.bonus_plus_btn)
 
-    tk.Label(
+    self.bonus_range_label = tk.Label(
         input_frame,
         text="Interval Range (Rounds after):",
         font=("Segoe UI", 11),
         fg="#d4d4d4",
         bg="#252526",
-    ).grid(row=2, column=0, sticky="w", pady=5)
+    )
+    self.bonus_range_label.grid(row=2, column=0, sticky="w", pady=5)
 
     interval_frame = tk.Frame(input_frame, bg="#252526")
     interval_frame.grid(row=2, column=1, padx=10, sticky="w")
@@ -2621,6 +2890,18 @@ class ZombiesTrackerApp:
     )
     undo_bonus_btn.pack(side="left", padx=(0, 4))
 
+    stats_bonus_btn = tk.Button(
+      hist_btns_right,
+      text="Stats",
+      command=lambda: self.show_stats_popup("Bonus"),
+      font=("Segoe UI", 9),
+      bg="#333333",
+      fg="#ffffff",
+      relief="flat",
+      padx=6,
+    )
+    stats_bonus_btn.pack(side="left", padx=(0, 4))
+
     reset_bonus_hist_btn = tk.Button(
         hist_btns_right,
         text="Reset History",
@@ -2667,12 +2948,16 @@ class ZombiesTrackerApp:
       self.calculate_zombies()
       self.refresh_gm_if_active()
     elif len(self.bonus_history) == 1:
-      self.reset_bonus_history()
+      self.bonus_history.clear()
+      self.on_bonus_preset_selected(None)
+      self.calculate_zombies()
+      self.refresh_gm_if_active()
 
   def set_excavator_location(self, loc):
     self.selected_excavator_location = loc
     self.update_excavator_buttons_ui()
     self.refresh_gm_if_active()
+    self.save_config()
 
   def update_excavator_buttons_ui(self):
     accent_hex = self.get_accent_hex()
@@ -2695,42 +2980,66 @@ class ZombiesTrackerApp:
       self.excavator_loc_frame.grid_remove()
 
     if selection == "None":
-      self.apply_bonus_preset(5, 4, 5)
+      self.apply_bonus_preset(5, 5, 4, 5)
     elif selection in ["Dogs", "Spiders"]:
-      self.apply_bonus_preset(5, 4, 5)
+      self.apply_bonus_preset(5, 7, 4, 5)
     elif selection == "Monkeys":
-      self.apply_bonus_preset(5, 4, 5)
+      self.apply_bonus_preset(2, 4, 4, 5)
     elif selection == "Shadows of Evil":
-      self.apply_bonus_preset(5, 5, 9)
+      self.apply_bonus_preset(5, 6, 5, 9)
     elif selection == "Der Eisendrache":
-      self.apply_bonus_preset(5, 7, 13)
+      self.apply_bonus_preset(5, 6, 7, 13)
     elif selection == "Gorod Krovi":
-      start_rnd = 12 if players == 1 else 9
-      self.apply_bonus_preset(start_rnd, 7, 9)
+      start_min = 9 if players > 1 else 12
+      start_max = start_min + 3
+      self.apply_bonus_preset(start_min, start_max, 7, 9)
     elif selection == "Revelations":
-      self.apply_bonus_preset(5, 9, 10)
+      self.apply_bonus_preset(5, 6, 9, 10)
     elif selection == "Excavator (Moon)":
-      self.apply_bonus_preset(1, 2, 8)
+      self.apply_bonus_preset(1, 5, 2, 8)
 
-  def apply_bonus_preset(self, start_rnd, min_int, max_int):
+  def apply_bonus_preset(self, init_min, init_max, int_min, int_max):
     self.bonus_entry.delete(0, tk.END)
-    self.bonus_entry.insert(0, str(start_rnd))
+    self.bonus_entry.insert(0, str(init_min))
 
     self.bonus_min_entry.delete(0, tk.END)
-    self.bonus_min_entry.insert(0, str(min_int))
+    self.bonus_min_entry.insert(0, str(init_min))
 
     self.bonus_max_entry.delete(0, tk.END)
-    self.bonus_max_entry.insert(0, str(max_int))
+    self.bonus_max_entry.insert(0, str(init_max))
 
-    self.bonus_history = [{
-        "round": start_rnd,
-        "preset": self.bonus_preset_combo.get(),
-        "location": (
-            self.selected_excavator_location
-            if self.bonus_preset_combo.get() == "Excavator (Moon)"
-            else None
-        ),
-    }]
+    self._preset_int_min = int_min
+    self._preset_int_max = int_max
+
+    self.bonus_history = []
+    if hasattr(self, "bonus_range_label"):
+      self.bonus_range_label.config(text="Initial Round Range:")
+    self.update_bonus_history_display()
+    self.calculate_bonus_round()
+    self.calculate_zombies()
+    self.refresh_gm_if_active()
+
+  def set_interval_range_for_preset(self, preset):
+    int_min = getattr(self, "_preset_int_min", 4)
+    int_max = getattr(self, "_preset_int_max", 5)
+    self.bonus_min_entry.delete(0, tk.END)
+    self.bonus_min_entry.insert(0, str(int_min))
+    self.bonus_max_entry.delete(0, tk.END)
+    self.bonus_max_entry.insert(0, str(int_max))
+    if hasattr(self, "bonus_range_label"):
+      self.bonus_range_label.config(text="Interval Range (Rounds after):")
+
+  def select_initial_bonus_round(self, round_val):
+    preset = self.bonus_preset_combo.get()
+    location = (
+        self.selected_excavator_location if preset == "Excavator (Moon)" else None
+    )
+    self.bonus_history = [
+        {"round": round_val, "preset": preset, "location": location}
+    ]
+    self.bonus_entry.delete(0, tk.END)
+    self.bonus_entry.insert(0, str(round_val))
+    self.set_interval_range_for_preset(preset)
     self.update_bonus_history_display()
     self.calculate_bonus_round()
     self.calculate_zombies()
@@ -2772,28 +3081,62 @@ class ZombiesTrackerApp:
           bg="#252526",
       ).pack(side="left", padx=5)
       self.bonus_history = []
+      if hasattr(self, "bonus_range_label"):
+        self.bonus_range_label.config(text="Initial Round Range:")
       self.update_bonus_history_display()
       self.calculate_zombies()
       self.refresh_gm_if_active()
       return
 
     try:
-      last_round = int(self.bonus_entry.get())
-      min_int = int(self.bonus_min_entry.get())
-      max_int = int(self.bonus_max_entry.get())
+      val1 = int(self.bonus_min_entry.get())
+      val2 = int(self.bonus_max_entry.get())
     except ValueError:
       messagebox.showerror(
           "Invalid Input", "Please enter valid numeric values for rounds."
       )
       return
 
+    for widget in self.bonus_buttons_container.winfo_children():
+      widget.destroy()
+
     if not self.bonus_history:
-      self.bonus_history = [{
-          "round": last_round,
-          "preset": preset,
-          "location": location,
-      }]
+      try:
+        start_r = int(self.bonus_entry.get())
+      except ValueError:
+        start_r = val1
+
+      span = max(0, val2 - val1)
+      end_r = start_r + span
+
+      if hasattr(self, "bonus_range_label"):
+        self.bonus_range_label.config(text="Initial Round Range:")
+
+      for r in range(start_r, end_r + 1):
+        btn = tk.Button(
+            self.bonus_buttons_container,
+            text=f"{r}",
+            command=lambda r_val=r: self.select_initial_bonus_round(r_val),
+            font=("Segoe UI", 11, "bold"),
+            bg=self.get_accent_hex(),
+            fg="#ffffff",
+            relief="flat",
+            width=5,
+            pady=8,
+        )
+        btn.pack(side="left", padx=5)
+        self.accent_buttons.append(btn)
     else:
+      if hasattr(self, "bonus_range_label"):
+        self.bonus_range_label.config(text="Interval Range (Rounds after):")
+
+      try:
+        last_round = int(self.bonus_entry.get())
+        min_int = val1
+        max_int = val2
+      except ValueError:
+        return
+
       if isinstance(self.bonus_history[-1], dict):
         self.bonus_history[-1]["round"] = last_round
         self.bonus_history[-1]["preset"] = preset
@@ -2801,28 +3144,25 @@ class ZombiesTrackerApp:
       else:
         self.bonus_history[-1] = last_round
 
-    self.update_bonus_history_display()
+      self.update_bonus_history_display()
 
-    next_min = last_round + min_int
-    next_max = last_round + max_int
+      next_min = last_round + min_int
+      next_max = last_round + max_int
 
-    for widget in self.bonus_buttons_container.winfo_children():
-      widget.destroy()
-
-    for r in range(next_min, next_max + 1):
-      btn = tk.Button(
-          self.bonus_buttons_container,
-          text=f"{r}",
-          command=lambda r_val=r: self.select_bonus_round(r_val),
-          font=("Segoe UI", 11, "bold"),
-          bg=self.get_accent_hex(),
-          fg="#ffffff",
-          relief="flat",
-          width=5,
-          pady=8,
-      )
-      btn.pack(side="left", padx=5)
-      self.accent_buttons.append(btn)
+      for r in range(next_min, next_max + 1):
+        btn = tk.Button(
+            self.bonus_buttons_container,
+            text=f"{r}",
+            command=lambda r_val=r: self.select_bonus_round(r_val),
+            font=("Segoe UI", 11, "bold"),
+            bg=self.get_accent_hex(),
+            fg="#ffffff",
+            relief="flat",
+            width=5,
+            pady=8,
+        )
+        btn.pack(side="left", padx=5)
+        self.accent_buttons.append(btn)
 
     self.calculate_zombies()
     self.refresh_gm_if_active()
@@ -2862,6 +3202,187 @@ class ZombiesTrackerApp:
     hist_str = " → ".join(formatted_items)
     self.bonus_history_lbl.config(text=hist_str)
 
+  def update_boss_history_display(self):
+    if not self.boss_history or self.boss_preset_combo.get() == "None":
+      self.boss_history_lbl.config(text="None")
+      return
+    hist_str = " → ".join(map(str, self.boss_history))
+    self.boss_history_lbl.config(text=hist_str)
+
+  def show_stats_popup(self, tracker_type="Bonus"):
+    is_bonus = (tracker_type == "Bonus")
+    history = self.bonus_history if is_bonus else self.boss_history
+    preset = self.bonus_preset_combo.get() if is_bonus else self.boss_preset_combo.get()
+
+    if not history or preset == "None":
+      messagebox.showinfo("No Statistics", "No history recorded yet or preset is set to None.")
+      return
+
+    rounds = []
+    locations = []
+    for item in history:
+      if isinstance(item, dict):
+        rounds.append(item["round"])
+        locations.append(item.get("location"))
+      else:
+        rounds.append(item)
+        locations.append(None)
+
+    stats_win = tk.Toplevel(self.root)
+    stats_win.title(f"{tracker_type} Round Statistics")
+    stats_win.geometry("420x480")
+
+    self.root.update_idletasks()
+    main_x = self.root.winfo_rootx()
+    main_y = self.root.winfo_rooty()
+    main_w = self.root.winfo_width()
+    main_h = self.root.winfo_height()
+
+    popup_w, popup_h = 420, 480
+    pos_x = main_x + (main_w - popup_w) // 2
+    pos_y = main_y + (main_h - popup_h) // 2
+    stats_win.geometry(f"{popup_w}x{popup_h}+{pos_x}+{pos_y}")
+
+    stats_win.configure(bg="#1e1e1e")
+    stats_win.transient(self.root)
+    stats_win.grab_set()
+
+    tk.Label(
+        stats_win,
+        text=f"{tracker_type} Rounds Detailed Statistics",
+        font=("Segoe UI", 12, "bold"),
+        fg="#ff5555",
+        bg="#1e1e1e",
+    ).pack(pady=(15, 10))
+
+    container = tk.Frame(stats_win, bg="#1e1e1e")
+    container.pack(fill="both", expand=True, padx=15, pady=5)
+
+    canvas = tk.Canvas(container, bg="#1e1e1e", highlightthickness=0)
+    scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+    scroll_frame = tk.Frame(canvas, bg="#1e1e1e")
+
+    scroll_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+    )
+    window_id = canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+    canvas.bind(
+        "<Configure>",
+        lambda e: canvas.itemconfig(window_id, width=e.width),
+    )
+    canvas.configure(yscrollcommand=scrollbar.set)
+
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+
+    def _on_mousewheel(event):
+      try:
+        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+      except Exception:
+        pass
+
+    stats_win.bind_all("<MouseWheel>", _on_mousewheel)
+
+    summary_frame = tk.Frame(scroll_frame, bg="#252526", padx=12, pady=10)
+    summary_frame.pack(fill="x", pady=(0, 10))
+
+    total_occurrences = len(rounds)
+    tk.Label(
+        summary_frame,
+        text=f"Total Occurrences: {total_occurrences}",
+        font=("Segoe UI", 10, "bold"),
+        fg="#ffffff",
+        bg="#252526",
+        anchor="w"
+    ).pack(fill="x", pady=2)
+
+    avg_interval_str = "N/A"
+    if len(rounds) >= 2:
+      intervals = [rounds[i] - rounds[i - 1] for i in range(1, len(rounds))]
+      avg_interval = sum(intervals) / len(intervals)
+      avg_interval_str = f"{avg_interval:.2f} rounds"
+
+    tk.Label(
+        summary_frame,
+        text=f"Average Interval: {avg_interval_str}",
+        font=("Segoe UI", 10),
+        fg="#d4d4d4",
+        bg="#252526",
+        anchor="w"
+    ).pack(fill="x", pady=2)
+
+    breakdown_frame = tk.Frame(scroll_frame, bg="#252526", padx=12, pady=10)
+    breakdown_frame.pack(fill="x", pady=(0, 10))
+
+    tk.Label(
+        breakdown_frame,
+        text="Bonus Round Interval Breakdown:",
+        font=("Segoe UI", 10, "bold"),
+        fg="#ff5555",
+        bg="#252526",
+        anchor="w"
+    ).pack(fill="x", pady=(0, 5))
+
+    if len(rounds) >= 2:
+      from collections import Counter
+      intervals = [rounds[i] - rounds[i - 1] for i in range(1, len(rounds))]
+      counts = Counter(intervals)
+      for iv, cnt in sorted(counts.items()):
+        tk.Label(
+            breakdown_frame,
+            text=f"• {iv}-rounders: {cnt}",
+            font=("Segoe UI", 9),
+            fg="#d4d4d4",
+            bg="#252526",
+            anchor="w"
+        ).pack(fill="x", pady=1)
+    else:
+      tk.Label(
+          breakdown_frame,
+          text="Need at least 2 recorded special rounds for breakdown.",
+          font=("Segoe UI", 9, "italic"),
+          fg="#888888",
+          bg="#252526",
+          anchor="w"
+      ).pack(fill="x", pady=1)
+
+    list_frame = tk.Frame(scroll_frame, bg="#252526", padx=12, pady=10)
+    list_frame.pack(fill="x", pady=(0, 5))
+
+    tk.Label(
+        list_frame,
+        text="Occurrence Log:",
+        font=("Segoe UI", 10, "bold"),
+        fg="#ff5555",
+        bg="#252526",
+        anchor="w"
+    ).pack(fill="x", pady=(0, 5))
+
+    for idx, r_val in enumerate(rounds):
+      loc_str = f" ({locations[idx]})" if locations[idx] else ""
+      text_line = f"#{idx + 1}: Round {r_val}{loc_str}"
+      if idx > 0:
+        interval_val = rounds[idx] - rounds[idx - 1]
+        text_line += f"  (+{interval_val})"
+      
+      tk.Label(
+          list_frame,
+          text=text_line,
+          font=("Segoe UI", 9),
+          fg="#ffffff",
+          bg="#252526",
+          anchor="w"
+      ).pack(fill="x", pady=1)
+
+    def on_closing():
+      stats_win.unbind_all("<MouseWheel>")
+      if hasattr(self, "calc_canvas") and self.pages[0].winfo_ismapped():
+        self.calc_canvas.bind_all("<MouseWheel>", self._on_calc_mousewheel)
+      stats_win.destroy()
+
+    stats_win.protocol("WM_DELETE_WINDOW", on_closing)
+
   def reset_bonus_history(self):
     self.bonus_history.clear()
     self.on_bonus_preset_selected(None)
@@ -2880,6 +3401,11 @@ class ZombiesTrackerApp:
     )
     title_lbl.pack(pady=15)
     self.accent_text_labels.append(title_lbl)
+
+    self.create_tab_header_panel(
+        self.boss_frame,
+        [("Boss Tracker", self.gm_show_boss)],
+    )
 
     input_frame = tk.Frame(self.boss_frame, bg="#252526", padx=15, pady=15)
     input_frame.pack(padx=20, fill="x")
@@ -3070,6 +3596,18 @@ class ZombiesTrackerApp:
     )
     undo_boss_btn.pack(side="left", padx=(0, 4))
 
+    stats_boss_btn = tk.Button(
+        boss_hist_btns_right,
+        text="Stats",
+        command=lambda: self.show_stats_popup("Boss"),
+        font=("Segoe UI", 9),
+        bg="#333333",
+        fg="#ffffff",
+        relief="flat",
+        padx=6,
+    )
+    stats_boss_btn.pack(side="left", padx=(0, 4))
+
     reset_boss_hist_btn = tk.Button(
         boss_hist_btns_right,
         text="Reset History",
@@ -3249,6 +3787,11 @@ class ZombiesTrackerApp:
     )
     title_lbl.pack(pady=10)
     self.accent_text_labels.append(title_lbl)
+
+    self.create_tab_header_panel(
+        self.gum_combined_frame,
+        [("Gum Tracker", self.gm_show_gums)],
+    )
 
     self.setup_section = tk.Frame(
         self.gum_combined_frame, bg="#252526", padx=10, pady=10
@@ -3463,6 +4006,7 @@ class ZombiesTrackerApp:
         name, False
     )
     self.update_gum_tracker_ui()
+    self.save_config()
 
     active_gums = [g for g in self.selected_gums if g is not None]
     if len(active_gums) == 5 and all(
@@ -3744,6 +4288,15 @@ class ZombiesTrackerApp:
     self.sr_title_lbl.pack(pady=(10, 5))
     self.accent_text_labels.append(self.sr_title_lbl)
 
+    self.sr_header_panel = self.create_tab_header_panel(
+        self.speedrun_frame,
+        [
+            ("Round Splits", self.gm_show_splits),
+            ("Timers", self.gm_show_timer),
+            ("Show SPH", self.sr_show_sph),
+        ],
+    )
+
     self.sr_ctrl_panel = tk.Frame(
         self.speedrun_frame, bg="#252526", padx=12, pady=8
     )
@@ -3818,76 +4371,21 @@ class ZombiesTrackerApp:
     )
     lss_load_btn.pack(side="right", padx=3)
 
+    sr_details_btn = tk.Button(
+        self.sr_btn_row,
+        text="Split Details",
+        command=self.show_landmark_details_popup,
+        font=("Segoe UI", 9),
+        bg="#333333",
+        fg="#ffffff",
+        relief="flat",
+        padx=8,
+        pady=4,
+    )
+    sr_details_btn.pack(side="right", padx=3)
+
     self.target_frame = tk.Frame(self.sr_ctrl_panel, bg="#252526")
     self.target_frame.pack(fill="x", pady=3)
-
-    self.gm_options_frame = tk.Frame(self.sr_ctrl_panel, bg="#252526")
-    self.gm_options_frame.pack(fill="x", pady=(3, 0))
-
-    tk.Label(
-        self.gm_options_frame,
-        text="Game Mode Trackers:",
-        font=("Segoe UI", 8, "bold"),
-        fg="#aaaaaa",
-        bg="#252526",
-    ).pack(side="left", padx=(0, 5))
-
-    self.gm_show_gums = tk.BooleanVar(value=False)
-    self.gm_show_powerups = tk.BooleanVar(value=False)
-    self.gm_show_bonus = tk.BooleanVar(value=False)
-    self.gm_show_boss = tk.BooleanVar(value=False)
-    self.gm_show_errors = tk.BooleanVar(value=False)
-
-    for text, var in [
-        ("Gums", self.gm_show_gums),
-        ("Powerups", self.gm_show_powerups),
-        ("Bonus", self.gm_show_bonus),
-        ("Boss", self.gm_show_boss),
-        ("Errors", self.gm_show_errors),
-    ]:
-      chk = tk.Checkbutton(
-          self.gm_options_frame,
-          text=text,
-          variable=var,
-          command=self.on_gm_option_changed,
-          font=("Segoe UI", 8),
-          fg="#d4d4d4",
-          bg="#252526",
-          selectcolor="#333333",
-          activebackground="#252526",
-          activeforeground="#ffffff",
-      )
-      chk.pack(side="left", padx=4)
-
-    self.sr_show_sph = tk.BooleanVar(value=False)
-    sph_chk = tk.Checkbutton(
-        self.gm_options_frame,
-        text="Show SPH",
-        variable=self.sr_show_sph,
-        command=lambda: [self.save_config(), self.rebuild_sr_splits_ui()],
-        font=("Segoe UI", 8, "bold"),
-        fg="#55ff55",
-        bg="#252526",
-        selectcolor="#333333",
-        activebackground="#252526",
-        activeforeground="#ffffff",
-    )
-    sph_chk.pack(side="right", padx=4)
-
-    self.sr_topmost_var = tk.BooleanVar(value=False)
-    self.topmost_chk = tk.Checkbutton(
-        self.target_frame,
-        text="Toggle Game Mode",
-        variable=self.sr_topmost_var,
-        command=self.toggle_always_on_top,
-        font=("Segoe UI", 8, "bold"),
-        fg="#55ff55",
-        bg="#252526",
-        selectcolor="#333333",
-        activebackground="#252526",
-        activeforeground="#ffffff",
-    )
-    self.topmost_chk.pack(side="left", padx=(0, 10))
 
     self.font_sub_frame = tk.Frame(self.target_frame, bg="#252526")
     self.font_sub_frame.pack(side="left", padx=5)
@@ -3961,7 +4459,7 @@ class ZombiesTrackerApp:
         font=("Segoe UI", 9, "bold"),
         fg="#aaaaaa",
         bg="#222222",
-        width=9,
+        width=12,
         anchor="e",
     ).pack(side="right")
     tk.Label(
@@ -3973,6 +4471,15 @@ class ZombiesTrackerApp:
         width=7,
         anchor="e",
     ).pack(side="right", padx=6)
+    tk.Label(
+        header_row,
+        text="Segment",
+        font=("Segoe UI", 9, "bold"),
+        fg="#aaaaaa",
+        bg="#222222",
+        width=8,
+        anchor="e",
+    ).pack(side="right")
     
     self.hdr_sph_lbl = tk.Label(
         header_row,
@@ -3983,17 +4490,8 @@ class ZombiesTrackerApp:
         width=7,
         anchor="e",
     )
-    self.hdr_sph_lbl.pack(side="right", padx=4)
-
-    tk.Label(
-        header_row,
-        text="Segment",
-        font=("Segoe UI", 9, "bold"),
-        fg="#aaaaaa",
-        bg="#222222",
-        width=8,
-        anchor="e",
-    ).pack(side="right")
+    if self.sr_show_sph.get():
+      self.hdr_sph_lbl.pack(side="right", padx=4)
 
     self.sr_canvas = tk.Canvas(
         self.splits_outer, bg="#141414", highlightthickness=0, height=217
@@ -4054,12 +4552,11 @@ class ZombiesTrackerApp:
         sub_right,
         text="00:00.0",
         font=("Consolas", 18),
-        fg=self.get_accent_hex(),
+        fg="#ffffff",
         bg="#181818",
         anchor="e",
     )
     self.sr_current_seg_lbl.pack(anchor="e")
-    self.accent_text_labels.append(self.sr_current_seg_lbl)
 
     self.timer_context_menu = tk.Menu(
         self.root, tearoff=0, bg="#252526", fg="#ffffff", activebackground=self.get_accent_hex()
@@ -4120,18 +4617,23 @@ class ZombiesTrackerApp:
     self._reset_last_delta = 0
     self._reset_last_seconds = float("inf")
 
-    et_main_frame = tk.Frame(self.error_tracker_frame, bg="#141414")
-    et_main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(10, 5))
-
     title_lbl = tk.Label(
-        et_main_frame,
+        self.error_tracker_frame,
         text="ERROR MONITOR",
         font=("Death Spirit", 16),
-        bg="#141414",
+        bg="#1e1e1e",
         fg="#00bfff",
     )
-    title_lbl.pack(pady=(2, 4))
+    title_lbl.pack(pady=(10, 5))
     self.accent_text_labels.append(title_lbl)
+
+    self.create_tab_header_panel(
+        self.error_tracker_frame,
+        [("Error Monitor", self.gm_show_errors)],
+    )
+
+    et_main_frame = tk.Frame(self.error_tracker_frame, bg="#141414")
+    et_main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(10, 5))
 
     top_bar = tk.Frame(et_main_frame, bg="#141414")
     top_bar.pack(fill=tk.X, pady=(0, 2))
@@ -4484,7 +4986,7 @@ class ZombiesTrackerApp:
                 elif reset_delta < 0:
                   self._reset_consistent_reads = 0
                   self._reset_last_seconds = float("inf")
-                
+              
                 self._reset_last_value = r_time
                 self._reset_last_time = now_t
 
@@ -4721,11 +5223,16 @@ class ZombiesTrackerApp:
       self.gm_trackers_display_frame.destroy()
 
     if not (
-        self.gm_show_gums.get()
+        getattr(self, "gm_show_timer", None) and self.gm_show_timer.get()
+        or getattr(self, "gm_show_splits", None) and self.gm_show_splits.get()
+        or self.gm_show_gums.get()
         or self.gm_show_powerups.get()
         or self.gm_show_bonus.get()
         or self.gm_show_boss.get()
         or self.gm_show_errors.get()
+        or self.gm_show_calc_zombies.get()
+        or self.gm_show_calc_hordes.get()
+        or self.gm_show_calc_health.get()
     ):
       return
 
@@ -4757,6 +5264,14 @@ class ZombiesTrackerApp:
         self._gm_badge_refs.append(new_badge_img)
         btn_widget.config(image=new_badge_img)
       return handler
+
+    if getattr(self, "gm_show_timers", None) and self.gm_show_timers.get():
+      timer_frame = tk.Frame(self.gm_trackers_display_frame, bg=bg_color, bd=0, highlightthickness=0)
+      timer_frame.pack(fill="x", pady=2)
+
+    if getattr(self, "gm_show_splits", None) and self.gm_show_splits.get():
+      splits_frame = tk.Frame(self.gm_trackers_display_frame, bg=bg_color, bd=0, highlightthickness=0)
+      splits_frame.pack(fill="x", pady=2)
 
     if self.gm_show_gums.get():
       gums_frame = tk.Frame(
@@ -4878,27 +5393,39 @@ class ZombiesTrackerApp:
         ).pack(side="left")
       else:
         try:
-          last_r = (
-              int(self.bonus_entry.get()) if hasattr(self, "bonus_entry") else 5
-          )
-          min_i = (
+          val1 = (
               int(self.bonus_min_entry.get())
               if hasattr(self, "bonus_min_entry")
               else 4
           )
-          max_i = (
+          val2 = (
               int(self.bonus_max_entry.get())
               if hasattr(self, "bonus_max_entry")
               else 5
           )
-          b_next_min = last_r + min_i
-          b_next_max = last_r + max_i
+          last_r = (
+              int(self.bonus_entry.get()) if hasattr(self, "bonus_entry") else 5
+          )
 
-          for r_val in range(b_next_min, b_next_max + 1):
+          if not self.bonus_history:
+            start_r = last_r
+            span = max(0, val2 - val1)
+            end_r = start_r + span
+            r_range = range(start_r, end_r + 1)
+          else:
+            next_min = last_r + val1
+            next_max = last_r + val2
+            r_range = range(next_min, next_max + 1)
+
+          for r_val in r_range:
             btn = tk.Button(
                 b_frame,
                 text=f"{r_val}",
-                command=lambda r=r_val: self.select_bonus_round(r),
+                command=lambda r=r_val, is_init=(not self.bonus_history): (
+                    self.select_initial_bonus_round(r)
+                    if is_init
+                    else self.select_bonus_round(r)
+                ),
                 font=("Segoe UI", 8, "bold"),
                 bg=self.get_accent_hex(),
                 fg="#ffffff",
@@ -5044,6 +5571,73 @@ class ZombiesTrackerApp:
               highlightthickness=0,
           ).pack(side="left")
 
+    if (
+        self.gm_show_calc_zombies.get()
+        or self.gm_show_calc_hordes.get()
+        or self.gm_show_calc_health.get()
+    ):
+      calc_frame = tk.Frame(
+          self.gm_trackers_display_frame,
+          bg=bg_color,
+          bd=0,
+          highlightthickness=0,
+      )
+      calc_frame.pack(fill="x", pady=2)
+
+      tk.Label(
+          calc_frame,
+          text="Round Stats:",
+          font=("Consolas", 8, "bold"),
+          fg="#00d2ff",
+          bg=bg_color,
+          bd=0,
+          highlightthickness=0,
+      ).pack(side="top", anchor="w", padx=(0, 4))
+
+      try:
+        round_num = int(self.round_entry.get()) if hasattr(self, "round_entry") else 1
+        players = int(self.players_spin.get()) if hasattr(self, "players_spin") else 1
+        preset = self.calc_preset_combo.get() if hasattr(self, "calc_preset_combo") else "Standard"
+        zombies = self.get_zombies_for_round(round_num, players)
+        hordes = zombies / 24.0
+        if preset == "Modern":
+          health = self.ai_calculate_health(150, round_num)
+        else:
+          if round_num <= 9:
+            health = 150 + (round_num - 1) * 100
+          else:
+            health = 950
+            for r in range(10, round_num + 1):
+              health = int(health * 1.1)
+          if round_num > 162:
+            health = 2147483647
+        cumulative = sum(
+            self.get_zombies_for_round(r, players) for r in range(1, round_num + 1)
+        )
+      except Exception:
+        round_num, zombies, hordes, health, cumulative = 1, 24, 1.0, 150, 24
+
+      stat_lines = []
+      if self.gm_show_calc_zombies.get():
+        stat_lines.append(f"Zombies: {zombies:,}")
+      if self.gm_show_calc_hordes.get():
+        stat_lines.append(f"Hordes: {hordes:.2f}")
+      if self.gm_show_calc_health.get():
+        stat_lines.append(f"Health: {health:,} HP")
+
+      for line in stat_lines:
+        tk.Label(
+            calc_frame,
+            text=line,
+            font=("Consolas", 9, "bold"),
+            fg="#ffffff",
+            bg=bg_color,
+            bd=0,
+            highlightthickness=0,
+            anchor="w",
+            padx=12
+        ).pack(fill="x", anchor="w")
+
     if self.gm_show_errors.get() and hasattr(self, "error_addresses_def"):
       err_frame = tk.Frame(
           self.gm_trackers_display_frame,
@@ -5155,20 +5749,49 @@ class ZombiesTrackerApp:
       self._drag_x = event.x_root
       self._drag_y = event.y_root
 
-  def update_drag_bar_visibility(self, is_paused):
+  def update_drag_bar_visibility(self, should_show):
     if not hasattr(self, "gm_drag_bar") or not self.gm_drag_bar.winfo_exists():
       return
 
-    is_currently_mapped = self.gm_drag_bar.winfo_ismapped()
-
-    if is_paused and not is_currently_mapped:
-      ctrl_panel = getattr(self, "sr_ctrl_panel", None)
-      if ctrl_panel and ctrl_panel.winfo_exists():
-        self.gm_drag_bar.pack(fill="x", side="top", before=ctrl_panel, pady=(0, 2))
+    TRANS_COLOR = "#000002"
+    if hasattr(self, "sr_topmost_var") and self.sr_topmost_var.get():
+      if should_show:
+        self.gm_drag_bar.config(bg=self.get_accent_hex())
+        if hasattr(self, "gm_drag_lbl") and self.gm_drag_lbl.winfo_exists():
+          self.gm_drag_lbl.config(
+              text="☰ DRAG TO MOVE | DO NOT COVER IDENTIFIER ☰",
+              bg=self.get_accent_hex(),
+              fg="#ffffff",
+          )
+        if hasattr(self, "gm_exit_btn") and self.gm_exit_btn.winfo_exists():
+          self.gm_exit_btn.config(
+              text="✕ Exit",
+              bg="#cc2222",
+              fg="#ffffff",
+              activebackground="#ff4444",
+              activeforeground="#ffffff",
+          )
       else:
-        self.gm_drag_bar.pack(fill="x", side="top", pady=(0, 2))
-    elif not is_paused and is_currently_mapped:
-      self.gm_drag_bar.pack_forget()
+        self.gm_drag_bar.config(bg=TRANS_COLOR)
+        if hasattr(self, "gm_drag_lbl") and self.gm_drag_lbl.winfo_exists():
+          self.gm_drag_lbl.config(
+              text="",
+              bg=TRANS_COLOR,
+              fg=TRANS_COLOR,
+          )
+        if hasattr(self, "gm_exit_btn") and self.gm_exit_btn.winfo_exists():
+          self.gm_exit_btn.config(
+              text="",
+              bg=TRANS_COLOR,
+              fg=TRANS_COLOR,
+              activebackground=TRANS_COLOR,
+              activeforeground=TRANS_COLOR,
+          )
+
+  def toggle_game_mode_hotkey(self, event=None):
+    current = self.sr_topmost_var.get()
+    self.sr_topmost_var.set(not current)
+    self.toggle_always_on_top()
 
   def toggle_always_on_top(self):
     is_topmost = self.sr_topmost_var.get()
@@ -5177,6 +5800,8 @@ class ZombiesTrackerApp:
     TRANS_COLOR = "#000002"
 
     if is_topmost:
+      self._pre_game_mode_page_index = getattr(self, "current_page_index", 0)
+
       for idx, frame in enumerate(self.pages):
         if frame == self.speedrun_frame:
           frame.pack(fill="both", expand=True)
@@ -5187,6 +5812,7 @@ class ZombiesTrackerApp:
 
       for widget_name in [
           "sr_title_lbl",
+          "sr_header_panel",
           "credit_lbl",
           "sr_btn_row",
           "font_sub_frame",
@@ -5201,6 +5827,12 @@ class ZombiesTrackerApp:
       self.root.overrideredirect(True)
 
       overhead_height = 220 + 32 + 22 + 30
+
+      if getattr(self, "gm_show_timer", None) and self.gm_show_timer.get():
+        overhead_height += 30
+
+      if getattr(self, "gm_show_splits", None) and self.gm_show_splits.get():
+        overhead_height += 30
 
       if self.gm_show_gums.get():
         overhead_height += 40
@@ -5224,6 +5856,21 @@ class ZombiesTrackerApp:
 
       if self.gm_show_boss.get():
         overhead_height += 35
+
+      if (
+          self.gm_show_calc_zombies.get()
+          or self.gm_show_calc_hordes.get()
+          or self.gm_show_calc_health.get()
+      ):
+        active_calc_count = sum(
+            1 for var in [
+                self.gm_show_calc_zombies,
+                self.gm_show_calc_hordes,
+                self.gm_show_calc_health,
+            ] if var.get()
+        )
+        if active_calc_count > 0:
+          overhead_height += (active_calc_count * 20) + 30
 
       if self.gm_show_errors.get() and hasattr(self, "error_addresses_def"):
         enabled_errors = [item for item in self.error_addresses_def if item.get("enabled")]
@@ -5256,19 +5903,36 @@ class ZombiesTrackerApp:
       if hasattr(self, "gm_drag_bar") and self.gm_drag_bar.winfo_exists():
         self.gm_drag_bar.destroy()
 
-      self.gm_drag_bar = tk.Frame(self.speedrun_frame, bg=self.get_accent_hex(), height=22)
+      self.gm_drag_bar = tk.Frame(self.speedrun_frame, bg=self.get_accent_hex(), height=24)
+      self.gm_drag_bar.pack(side="top", fill="x")
       self.gm_drag_bar.pack_propagate(False)
 
-      drag_lbl = tk.Label(
+      self.gm_exit_btn = tk.Button(
+          self.gm_drag_bar,
+          text="✕ Exit",
+          command=lambda: [self.sr_topmost_var.set(False), self.toggle_always_on_top()],
+          font=("Segoe UI", 8, "bold"),
+          bg="#cc2222",
+          fg="#ffffff",
+          activebackground="#ff4444",
+          activeforeground="#ffffff",
+          relief="flat",
+          bd=0,
+          padx=8,
+          cursor="hand2"
+      )
+      self.gm_exit_btn.pack(side="right", fill="y", padx=2, pady=2)
+
+      self.gm_drag_lbl = tk.Label(
           self.gm_drag_bar,
           text="☰ DRAG TO MOVE | DO NOT COVER IDENTIFIER ☰",
           font=("Segoe UI", 7, "bold"),
           fg="#ffffff",
           bg=self.get_accent_hex(),
       )
-      drag_lbl.pack(expand=True)
+      self.gm_drag_lbl.pack(side="left", expand=True, fill="both")
 
-      for w_drag in [self.gm_drag_bar, drag_lbl]:
+      for w_drag in [self.gm_drag_bar, self.gm_drag_lbl]:
         w_drag.bind("<Button-1>", self._start_move)
         w_drag.bind("<B1-Motion>", self._do_move)
 
@@ -5309,15 +5973,6 @@ class ZombiesTrackerApp:
           child.config(bg=TRANS_COLOR)
           for sub in child.winfo_children():
             sub.config(bg=TRANS_COLOR)
-
-      if hasattr(self, "sr_splits_container"):
-        for row in self.sr_splits_container.winfo_children():
-          row.config(bg=TRANS_COLOR)
-          for item in row.winfo_children():
-            try:
-              item.config(bg=TRANS_COLOR)
-            except Exception:
-              pass
 
       self.pack_game_mode_layout()
 
@@ -5389,7 +6044,7 @@ class ZombiesTrackerApp:
         if hasattr(self, "sr_total_time_lbl") and self.sr_total_time_lbl.winfo_exists():
           self.sr_total_time_lbl.config(bg="#181818", fg=self.get_accent_hex())
         if hasattr(self, "sr_current_seg_lbl") and self.sr_current_seg_lbl.winfo_exists():
-          self.sr_current_seg_lbl.config(bg="#181818", fg=self.get_accent_hex())
+          self.sr_current_seg_lbl.config(bg="#181818", fg="#ffffff")
 
       self.tab_bar.pack_forget()
       self.content_container.pack_forget()
@@ -5401,10 +6056,12 @@ class ZombiesTrackerApp:
       if hasattr(self, "credit_lbl") and self.credit_lbl.winfo_exists():
         self.credit_lbl.pack(side="bottom", fill="x", pady=(0, 4))
 
-      self.show_page(5)
+      target_page = getattr(self, "_pre_game_mode_page_index", 0)
+      self.show_page(target_page)
 
       for w in [
           getattr(self, "sr_title_lbl", None),
+          getattr(self, "sr_header_panel", None),
           getattr(self, "sr_ctrl_panel", None),
           getattr(self, "splits_outer", None),
           getattr(self, "sr_timer_panel", None),
@@ -5414,6 +6071,8 @@ class ZombiesTrackerApp:
 
       if hasattr(self, "sr_title_lbl") and self.sr_title_lbl.winfo_exists():
         self.sr_title_lbl.pack(pady=(10, 5))
+      if hasattr(self, "sr_header_panel") and self.sr_header_panel.winfo_exists():
+        self.sr_header_panel.pack(padx=20, pady=5, fill="x")
       if hasattr(self, "sr_ctrl_panel") and self.sr_ctrl_panel.winfo_exists():
         self.sr_ctrl_panel.pack(padx=15, fill="x", pady=5)
       if hasattr(self, "splits_outer") and self.splits_outer.winfo_exists():
@@ -5440,14 +6099,13 @@ class ZombiesTrackerApp:
     if hasattr(self, "gm_drag_bar") and self.gm_drag_bar.winfo_exists():
       self.gm_drag_bar.pack(fill="x", side="top", pady=(0, 2))
 
-    if hasattr(self, "sr_ctrl_panel") and self.sr_ctrl_panel.winfo_exists():
-      self.sr_ctrl_panel.pack(fill="x", side="top", pady=(0, 2), padx=0)
+    if getattr(self, "gm_show_splits", None) and self.gm_show_splits.get():
+      if hasattr(self, "splits_outer") and self.splits_outer.winfo_exists():
+        self.splits_outer.pack(fill="both", expand=False, side="top", pady=(0, 4))
 
-    if hasattr(self, "splits_outer") and self.splits_outer.winfo_exists():
-      self.splits_outer.pack(fill="both", expand=False, side="top", pady=(0, 4))
-
-    if hasattr(self, "sr_timer_panel") and self.sr_timer_panel.winfo_exists():
-      self.sr_timer_panel.pack(fill="x", side="top", pady=(0, 4))
+    if getattr(self, "gm_show_timer", None) and self.gm_show_timer.get():
+      if hasattr(self, "sr_timer_panel") and self.sr_timer_panel.winfo_exists():
+        self.sr_timer_panel.pack(fill="x", side="top", pady=(0, 4))
 
     if hasattr(self, "gm_trackers_display_frame") and self.gm_trackers_display_frame.winfo_exists():
       self.gm_trackers_display_frame.pack(fill="x", side="top", pady=(0, 0))
@@ -5560,6 +6218,180 @@ class ZombiesTrackerApp:
         messagebox.showerror(
             "Load Failed", f"Could not parse splits file: {e}"
         )
+
+  def show_landmark_details_popup(self):
+    details_win = tk.Toplevel(self.root)
+    details_win.title("Split Details")
+    details_win.geometry("450x600")
+
+    self.root.update_idletasks()
+    main_x = self.root.winfo_rootx()
+    main_y = self.root.winfo_rooty()
+    main_w = self.root.winfo_width()
+    main_h = self.root.winfo_height()
+
+    popup_w, popup_h = 450, 600
+    pos_x = main_x + (main_w - popup_w) // 2
+    pos_y = main_y + (main_h - popup_h) // 2
+    details_win.geometry(f"{popup_w}x{popup_h}+{pos_x}+{pos_y}")
+
+    details_win.configure(bg="#1e1e1e")
+    details_win.transient(self.root)
+    details_win.grab_set()
+
+    tk.Label(
+        details_win,
+        text="Detailed Landmark Split Information",
+        font=("Segoe UI", 12, "bold"),
+        fg="#ff5555",
+        bg="#1e1e1e",
+    ).pack(pady=(15, 10))
+
+    container = tk.Frame(details_win, bg="#1e1e1e")
+    container.pack(fill="both", expand=True, padx=15, pady=5)
+
+    canvas = tk.Canvas(container, bg="#1e1e1e", highlightthickness=0)
+    scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+    scroll_frame = tk.Frame(canvas, bg="#1e1e1e")
+
+    scroll_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+    )
+    window_id = canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+    canvas.bind(
+        "<Configure>",
+        lambda e: canvas.itemconfig(window_id, width=e.width),
+    )
+    canvas.configure(yscrollcommand=scrollbar.set)
+
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+
+    def _on_mousewheel(event):
+      try:
+        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+      except Exception:
+        pass
+
+    details_win.bind_all("<MouseWheel>", _on_mousewheel)
+
+    landmarks = [30, 50, 70, 100]
+    curr = 110
+    while curr <= 255:
+      landmarks.append(curr)
+      curr += 10
+    if 255 not in landmarks:
+      landmarks.append(255)
+
+    split_map = {}
+    for s in self.splits_list:
+      m = re.search(r"\d+", s["name"])
+      if m:
+        r_num = int(m.group())
+        split_map[r_num] = s
+
+    reached_landmarks = []
+    for r in landmarks:
+      s_data = split_map.get(r)
+      if s_data and s_data.get("completed", False):
+        reached_landmarks.append(r)
+
+    if not reached_landmarks:
+      msg_lbl = tk.Label(
+          scroll_frame,
+          text="No landmark round has been reached, reach round 30 to view split details.",
+          font=("Segoe UI", 10, "italic"),
+          fg="#888888",
+          bg="#1e1e1e",
+          justify="center",
+          wraplength=400,
+      )
+      msg_lbl.pack(pady=40)
+    else:
+      hdr_frame = tk.Frame(scroll_frame, bg="#252526", padx=8, pady=6)
+      hdr_frame.pack(fill="x", pady=2)
+      tk.Label(
+          hdr_frame,
+          text="Round",
+          font=("Segoe UI", 9, "bold"),
+          fg="#d4d4d4",
+          bg="#252526",
+          width=12,
+          anchor="w",
+      ).pack(side="left")
+      tk.Label(
+          hdr_frame,
+          text="Time",
+          font=("Segoe UI", 9, "bold"),
+          fg="#d4d4d4",
+          bg="#252526",
+          width=16,
+          anchor="e",
+      ).pack(side="left")
+      tk.Label(
+          hdr_frame,
+          text="Segment",
+          font=("Segoe UI", 9, "bold"),
+          fg="#d4d4d4",
+          bg="#252526",
+          width=16,
+          anchor="e",
+      ).pack(side="left")
+
+      prev_time = 0.0
+      for idx, r in enumerate(reached_landmarks):
+        row_bg = "#2d2d2d"
+        row_frame = tk.Frame(scroll_frame, bg=row_bg, padx=8, pady=6)
+        row_frame.pack(fill="x", pady=2)
+
+        tk.Label(
+            row_frame,
+            text=f"Round {r}",
+            font=("Segoe UI", 9, "bold"),
+            fg="#ffffff",
+            bg=row_bg,
+            width=12,
+            anchor="w",
+        ).pack(side="left")
+
+        split_data = split_map.get(r)
+        overall_time = (
+            split_data.get("total_time")
+            if split_data.get("total_time") is not None
+            else split_data.get("pb_total", 0.0)
+        )
+
+        segment_time = overall_time - prev_time
+
+        tk.Label(
+            row_frame,
+            text=self.format_time(overall_time),
+            font=("Segoe UI", 9),
+            fg="#d4d4d4",
+            bg=row_bg,
+            width=16,
+            anchor="e",
+        ).pack(side="left")
+        tk.Label(
+            row_frame,
+            text=self.format_time(segment_time),
+            font=("Segoe UI", 9),
+            fg="#d4d4d4",
+            bg=row_bg,
+            width=16,
+            anchor="e",
+        ).pack(side="left")
+
+        prev_time = overall_time
+
+    def on_closing():
+      details_win.unbind_all("<MouseWheel>")
+      if hasattr(self, "calc_canvas") and self.pages[0].winfo_ismapped():
+        self.calc_canvas.bind_all("<MouseWheel>", self._on_calc_mousewheel)
+      details_win.destroy()
+
+    details_win.protocol("WM_DELETE_WINDOW", on_closing)
 
   def open_edit_splits_window(self):
     edit_win = tk.Toplevel(self.root)
@@ -5810,6 +6642,11 @@ class ZombiesTrackerApp:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
           content = f.read()
 
+        if hasattr(self, "asl_stop_event") and self.asl_stop_event:
+          self.asl_stop_event.set()
+        
+        self.asl_stop_event = threading.Event()
+
         self.asl_script_loaded = True
         self.loaded_asl_path = file_path
         filename = os.path.basename(file_path)
@@ -5826,6 +6663,8 @@ class ZombiesTrackerApp:
         )
 
   def run_asl_memory_listener(self):
+    current_stop_event = getattr(self, "asl_stop_event", None)
+
     OFFSETS_CONFIG = {
         "blackops3.exe": {
             "game": "bo3",
@@ -5884,6 +6723,11 @@ class ZombiesTrackerApp:
     is_timer_running = False
 
     while True:
+      if current_stop_event and current_stop_event.is_set():
+        if reader:
+          reader.close()
+        break
+
       if not reader or not reader.h_process:
         self.root.after(
             0,
@@ -5894,13 +6738,19 @@ class ZombiesTrackerApp:
 
         found_reader = None
         for proc_name in target_processes:
+          if current_stop_event and current_stop_event.is_set():
+            break
           test_reader = MemoryReader(proc_name)
           if test_reader.attach():
             found_reader = test_reader
             break
 
         if not found_reader:
-          time.sleep(1.5)
+          self.root.after(0, lambda: self.update_drag_bar_visibility(True))
+          for _ in range(30):
+            if current_stop_event and current_stop_event.is_set():
+              break
+            time.sleep(0.05)
           continue
 
         if reader:
@@ -5947,6 +6797,8 @@ class ZombiesTrackerApp:
       last_round = -1
 
       while reader.h_process:
+        if current_stop_event and current_stop_event.is_set():
+          break
         time.sleep(0.05)
 
         exit_code = wintypes.DWORD()
@@ -6004,7 +6856,10 @@ class ZombiesTrackerApp:
             self._old_ticks = ticks_val
             self.root.after(
                 0,
-                lambda: self.asl_lbl.config(text="BO1 In Menu / Lobby", fg="#888888"),
+                lambda: [
+                    self.asl_lbl.config(text="BO1 In Menu / Lobby", fg="#888888"),
+                    self.update_drag_bar_visibility(True)
+                ],
             )
             continue
 
@@ -6013,7 +6868,10 @@ class ZombiesTrackerApp:
             self._bo1_offset = 2 if "zombie_moon" in map_name else 0
             self._bo1_step = (2 + self._bo1_offset) if not round_change_val else (3 + self._bo1_offset)
             self._old_round_change = round_change_val
-            self.root.after(0, self.sr_start_timer_only)
+            self.root.after(0, lambda: [
+                self.sr_start_timer_only(),
+                self.update_drag_bar_visibility(False)
+            ])
 
           if is_timer_running:
             if self._old_round_change is not None and round_change_val != self._old_round_change:
@@ -6078,7 +6936,10 @@ class ZombiesTrackerApp:
 
           is_paused = (paused_val == 1)
           self.is_paused = is_paused
-          self.update_drag_bar_visibility(is_paused)
+
+          in_menu = (round_val < 1 or round_val > 255)
+          should_show_drag = in_menu or is_paused
+          self.root.after(0, lambda s=should_show_drag: self.update_drag_bar_visibility(s))
 
           if 1 <= round_val <= 255:
             status_msg = (
@@ -6124,6 +6985,103 @@ class ZombiesTrackerApp:
                 ),
             )
 
+    if reader:
+      reader.close()
+
+  def game_round_auto_detect_loop(self):
+    process_list = [
+        ("blackops3.exe", "bo3"),
+        ("boiii.exe", "bo3"),
+        ("blackops.exe", "bo1"),
+        ("bgamert5.exe", "bo1"),
+    ]
+    
+    reader = MemoryReader("blackops3.exe")
+    self._last_game_memory_round = -1
+    
+    while True:
+      try:
+        if not reader.h_process:
+          attached = False
+          for proc_name, game_type in process_list:
+            reader.process_name = proc_name
+            if reader.attach():
+              attached = True
+              print(f"[RoundAutoDetect] Attached to {game_type} ({proc_name})")
+              break
+          
+          if not attached:
+            if not getattr(self, "user_changed_round_manually", False):
+              def set_one():
+                if hasattr(self, "round_entry") and self.round_entry.winfo_exists():
+                  if self.round_entry.focus_get() != self.round_entry:
+                    curr = self.round_entry.get().strip()
+                    if curr != "1":
+                      self.round_entry.delete(0, tk.END)
+                      self.round_entry.insert(0, "1")
+                      self.calculate_zombies()
+              try:
+                self.root.after(0, set_one)
+              except Exception:
+                pass
+            time.sleep(2.0)
+            continue
+
+        base_addr = reader.get_module_base(reader.process_name)
+        if base_addr == 0:
+          base_addr = reader.get_module_base("blackops3.exe" if "3" in reader.process_name else "blackops.exe")
+        if base_addr == 0:
+          base_addr = 0x140000000 if "3" in reader.process_name else 0x00400000
+
+        if "3" in reader.process_name:
+          round_val = reader.read_int32(base_addr + 0xA55BDEC)
+          if round_val is None or round_val < 0 or round_val > 255:
+            abs_val = reader.read_int32(0xA55BDEC)
+            round_val = abs_val if (abs_val is not None and 0 <= abs_val <= 255) else 0
+        else:
+          round_val = 0
+
+        if round_val != self._last_game_memory_round:
+          self._last_game_memory_round = round_val
+          self.user_changed_round_manually = False
+
+          if 1 <= round_val <= 255:
+            def update_round(r=round_val):
+              if hasattr(self, "round_entry") and self.round_entry.winfo_exists():
+                if self.round_entry.focus_get() != self.round_entry:
+                  self.round_entry.delete(0, tk.END)
+                  self.round_entry.insert(0, str(r))
+                  self.calculate_zombies()
+            try:
+              self.root.after(0, update_round)
+            except Exception:
+              pass
+          else:
+            if not getattr(self, "user_changed_round_manually", False):
+              def set_one():
+                if hasattr(self, "round_entry") and self.round_entry.winfo_exists():
+                  if self.round_entry.focus_get() != self.round_entry:
+                    curr = self.round_entry.get().strip()
+                    if curr != "1":
+                      self.round_entry.delete(0, tk.END)
+                      self.round_entry.insert(0, "1")
+                      self.calculate_zombies()
+              try:
+                self.root.after(0, set_one)
+              except Exception:
+                pass
+
+      except Exception as e:
+        print(f"[RoundAutoDetect] Error: {e}")
+        try:
+          if reader:
+            reader.close()
+        except Exception:
+          pass
+        time.sleep(2.0)
+
+      time.sleep(0.5)
+
   def sr_generate_splits(self):
     target = 255
 
@@ -6147,211 +7105,316 @@ class ZombiesTrackerApp:
     self.update_sr_substat_display()
     self.rebuild_sr_splits_ui()
 
-  def sr_generate_splits(self):
-        target = 255
-
-        self.splits_list = []
-        for r in range(2, target + 1):
-            self.splits_list.append({
-                "name": f"Round {r}",
-                "completed": False,
-                "total_time": None,
-                "segment_time": None,
-                "delta_str": "",
-                "pb_total": (r - 1) * 60.0,
-            })
-
-        self.current_split_index = 0
-        self.loaded_lss_filename = "Default Generator"
-        if hasattr(self, "lss_status_lbl"):
-            self.lss_status_lbl.config(
-                text=f"Splits: {self.loaded_lss_filename}", fg="#888888"
-            )
-        self.update_sr_substat_display()
-        self.rebuild_sr_splits_ui()
-
   def rebuild_sr_splits_ui(self):
-      accent_hex = self.get_accent_hex()
-      is_topmost = self.sr_topmost_var.get()
-      TRANS_COLOR = "#000002"
-      show_sph = self.sr_show_sph.get()
-      current_font = self.timer_font_var.get() if hasattr(self, "timer_font_var") else "Segoe UI"
+    accent_hex = self.get_accent_hex()
+    is_topmost = self.sr_topmost_var.get()
+    TRANS_COLOR = "#000002"
+    show_sph = self.sr_show_sph.get()
+    current_font = self.timer_font_var.get() if hasattr(self, "timer_font_var") else "Segoe UI"
 
-      if hasattr(self, "hdr_sph_lbl") and self.hdr_sph_lbl.winfo_exists():
-          if show_sph:
-              self.hdr_sph_lbl.pack(side="right", padx=4)
-          else:
-              self.hdr_sph_lbl.pack_forget()
-
-      current_elapsed = 0.0
-      if self.timer_running:
-          current_elapsed = (
-              time.time() - self.timer_start_ticks - self.elapsed_paused_time
-          )
-
-      max_visible = 7
-      total_splits = len(self.splits_list)
-      if self.current_split_index < max_visible - 1:
-          start_idx = 0
+    if hasattr(self, "hdr_sph_lbl") and self.hdr_sph_lbl.winfo_exists():
+      if show_sph:
+        self.hdr_sph_lbl.pack(side="right", padx=4)
       else:
-          start_idx = self.current_split_index - max_visible + 1
-      end_idx = min(total_splits, start_idx + max_visible)
-      visible_splits_slice = self.splits_list[start_idx:end_idx]
+        self.hdr_sph_lbl.pack_forget()
 
-      if hasattr(self, "sr_canvas") and self.sr_canvas.winfo_exists():
-          self.sr_canvas.config(height=len(visible_splits_slice) * 31)
+    if not hasattr(self, "splits_list") or not self.splits_list:
+      self.splits_list = [
+          {"name": f"Round {i}", "completed": False, "total_time": 0.0, "pb_total": i * 20.0, "segment_time": 0.0}
+          for i in range(2, 11)
+      ]
+      self.current_split_index = 0
 
-      for widget in self.sr_splits_container.winfo_children():
-          widget.destroy()
+    current_elapsed = 0.0
+    if getattr(self, "timer_running", False):
+      current_elapsed = (
+          time.time() - getattr(self, "timer_start_ticks", time.time()) - getattr(self, "elapsed_paused_time", 0.0)
+      )
 
-      for row_idx, (actual_idx, split) in enumerate(
-          enumerate(visible_splits_slice, start=start_idx)
-      ):
-          is_active = (
-              actual_idx == self.current_split_index
-              and self.timer_running
-              and not split["completed"]
-          )
+    max_visible = 7
+    total_splits = len(self.splits_list)
+    if self.current_split_index < max_visible - 1:
+      start_idx = 0
+    else:
+      start_idx = self.current_split_index - max_visible + 1
+    end_idx = min(total_splits, start_idx + max_visible)
+    visible_splits_slice = self.splits_list[start_idx:end_idx]
 
-          if is_active:
-              row_bg = f"#{int(self.accent_rgb[0]*0.4):02x}{int(self.accent_rgb[1]*0.4):02x}{int(self.accent_rgb[2]*0.4):02x}"
-          else:
-              row_bg = (
-                  TRANS_COLOR
-                  if is_topmost
-                  else ("#181818" if row_idx % 2 == 0 else "#1e1e1e")
-              )
+    row_height = 38
+    needed_height = len(visible_splits_slice) * row_height
 
-          row_frame = tk.Frame(self.sr_splits_container, bg=row_bg, padx=8, pady=6)
-          row_frame.pack(fill="x", pady=1)
-          row_frame.bind("<Button-3>", self.show_timer_context_menu)
-          row_frame.bind("<Double-Button-1>", lambda e: self.toggle_game_mode_double_click())
+    if hasattr(self, "sr_canvas") and self.sr_canvas.winfo_exists():
+      self.sr_canvas.config(height=needed_height)
+      try:
+        top_level = self.sr_canvas.winfo_toplevel()
+        top_level.update_idletasks()
+      except Exception:
+        pass
 
-          name_lbl = tk.Label(
-              row_frame,
-              text=split["name"],
-              font=(current_font, 11, "bold" if is_active else "normal"),
-              fg=accent_hex,
-              bg=row_bg,
-              width=12,
+    for widget in self.sr_splits_container.winfo_children():
+      widget.destroy()
+
+    if not hasattr(self, "accent_rgb") or not self.accent_rgb:
+      self.accent_rgb = (0, 150, 255)
+
+    self.active_row_canvas = None
+    self.active_delta_text_id = None
+    self.active_time_text_id = None
+
+    for row_idx, (actual_idx, split) in enumerate(
+        enumerate(visible_splits_slice, start=start_idx)
+    ):
+      is_active = (
+          actual_idx == self.current_split_index
+          and not split["completed"]
+      )
+
+      if is_active:
+        canvas_height = 34
+        row_canvas = tk.Canvas(
+            self.sr_splits_container,
+            height=canvas_height,
+            bg="#141414" if not is_topmost else TRANS_COLOR,
+            highlightthickness=0,
+        )
+        row_canvas.pack(fill="x", pady=1)
+        row_canvas.bind("<Button-3>", self.show_timer_context_menu)
+        row_canvas.bind("<Double-Button-1>", lambda e: self.toggle_game_mode_double_click())
+
+        self.active_row_canvas = row_canvas
+
+        def draw_active_row_gradient(event=None, c=row_canvas, act_idx=actual_idx, s_data=split):
+          c.delete("all")
+          
+          self.sr_splits_container.update_idletasks()
+          w = self.sr_splits_container.winfo_width()
+          if w < 50:
+            w = c.winfo_width()
+          if w < 50:
+            w = 380
+
+          r_accent, g_accent, b_accent = self.accent_rgb
+          end_bg = (24, 24, 24) if not is_topmost else (2, 2, 2)
+          
+          grad_img = self.create_row_gradient_image(w, canvas_height, (r_accent, g_accent, b_accent), end_bg)
+          if not hasattr(self, "_active_grad_cache"):
+            self._active_grad_cache = []
+          self._active_grad_cache.append(grad_img)
+
+          c.create_image(0, 0, anchor="nw", image=grad_img)
+
+          current_font_name = current_font if current_font else "Segoe UI"
+
+          c.create_text(
+              16, canvas_height / 2,
+              text=s_data["name"],
               anchor="w",
+              font=(current_font_name, 11, "bold"),
+              fill="#ffffff"
           )
-          name_lbl.pack(side="left")
-          name_lbl.bind("<Button-3>", self.show_timer_context_menu)
-          name_lbl.bind("<Double-Button-1>", lambda e: self.toggle_game_mode_double_click())
 
-          if split["completed"]:
-              t_str = self.format_time(split["total_time"])
+          if s_data["completed"]:
+            t_str = self.format_time(s_data["total_time"])
           else:
-              t_str = (
-                  self.format_time(split["pb_total"])
-                  if actual_idx >= self.current_split_index
-                  else "--"
-              )
+            t_str = self.format_time(s_data["pb_total"]) if act_idx >= self.current_split_index else "--"
 
-          time_lbl = tk.Label(
-              row_frame,
+          self.active_time_text_id = c.create_text(
+              w - 12, canvas_height / 2,
               text=t_str,
-              font=(current_font, 10, "bold"),
-              fg="#ffffff",
-              bg=row_bg,
-              width=9,
               anchor="e",
+              font=(current_font_name, 10, "bold"),
+              fill="#ffffff"
           )
-          time_lbl.pack(side="right")
-          time_lbl.bind("<Button-3>", self.show_timer_context_menu)
-          time_lbl.bind("<Double-Button-1>", lambda e: self.toggle_game_mode_double_click())
 
-          if split["completed"]:
-              d_str = split.get("delta_str", "")
-          elif actual_idx == self.current_split_index and self.timer_running:
-              prev_total = (
-                  self.splits_list[actual_idx - 1]["total_time"]
-                  if actual_idx > 0
-                  else 0.0
-              )
-              live_seg_elapsed = current_elapsed - prev_total
-              prev_pb_total = (
-                  self.splits_list[actual_idx - 1]["pb_total"]
-                  if actual_idx > 0
-                  else 0.0
-              )
-              pb_seg = split["pb_total"] - prev_pb_total
-              live_delta = live_seg_elapsed - pb_seg
-              d_str = f"+{live_delta:.1f}" if live_delta >= 0 else f"{live_delta:.1f}"
+          if s_data["completed"]:
+            d_str = s_data.get("delta_str", "")
+          elif act_idx == self.current_split_index and getattr(self, "timer_running", False):
+            prev_total = self.splits_list[act_idx - 1]["total_time"] if act_idx > 0 else 0.0
+            live_seg_elapsed = current_elapsed - prev_total
+            prev_pb_total = self.splits_list[act_idx - 1]["pb_total"] if act_idx > 0 else 0.0
+            pb_seg = s_data["pb_total"] - prev_pb_total
+            live_delta = live_seg_elapsed - pb_seg
+            d_str = self.format_delta(live_delta)
           else:
-              d_str = ""
+            d_str = ""
 
-          d_fg = "#55ff55" if d_str.startswith("-") else "#ff5555"
-          delta_lbl = tk.Label(
-              row_frame,
+          d_color = "#55ff55" if d_str.startswith("-") else "#ff5555"
+          self.active_delta_text_id = c.create_text(
+              w - 111, canvas_height / 2,
               text=d_str,
-              font=(current_font, 9),
-              fg=d_fg,
-              bg=row_bg,
-              width=7,
               anchor="e",
+              font=(current_font_name, 9),
+              fill=d_color
           )
-          delta_lbl.pack(side="right", padx=6)
-          delta_lbl.bind("<Button-3>", self.show_timer_context_menu)
-          delta_lbl.bind("<Double-Button-1>", lambda e: self.toggle_game_mode_double_click())
 
-          if split["completed"]:
-              seg_str = self.format_time_short(split["segment_time"])
-              seg_fg = "#aaaaaa"
-          else:
-              prev_pb_total = (
-                  self.splits_list[actual_idx - 1]["pb_total"]
-                  if actual_idx > 0
-                  else 0.0
-              )
-              pb_seg = split["pb_total"] - prev_pb_total
-              seg_str = self.format_time_short(pb_seg)
-              seg_fg = "#666666" if actual_idx > self.current_split_index else "#ffffff"
+          prev_pb_total = self.splits_list[act_idx - 1]["pb_total"] if act_idx > 0 else 0.0
+          pb_seg = s_data["pb_total"] - prev_pb_total
+          seg_str = self.format_time_short(pb_seg)
 
-          seg_lbl = tk.Label(
-              row_frame,
+          c.create_text(
+              w - 182, canvas_height / 2,
               text=seg_str,
-              font=(current_font, 9),
-              fg=seg_fg,
-              bg=row_bg,
-              width=8,
               anchor="e",
+              font=(current_font_name, 9),
+              fill="#ffffff"
           )
-          seg_lbl.pack(side="right")
-          seg_lbl.bind("<Button-3>", self.show_timer_context_menu)
-          seg_lbl.bind("<Double-Button-1>", lambda e: self.toggle_game_mode_double_click())
 
-          if show_sph:
-              sph_str = ""
-              sph_color = "#55ff55"
-              if split["completed"] and split["segment_time"] is not None:
-                  match = re.search(r"\d+", split["name"])
-                  r_num = int(match.group()) if match else (actual_idx + 2)
-                  zombies = self.get_zombies_for_round(r_num, int(self.players_spin.get() if hasattr(self, "players_spin") else 1))
-                  hordes = zombies / 24.0
-                  if hordes > 0:
-                      sph_val = split["segment_time"] / hordes
-                      sph_str = f"{sph_val:.1f}"
-                      if sph_val <= 5.0:
-                          sph_color = "#55ff55"
-                      elif sph_val <= 7.0:
-                          sph_color = "#ffff55"
-                      else:
-                          sph_color = "#ff5555"
+        row_canvas.bind("<Configure>", draw_active_row_gradient)
+        draw_active_row_gradient()
+        continue
 
-              sph_lbl = tk.Label(
-                  row_frame,
-                  text=sph_str,
-                  font=(current_font, 9, "bold"),
-                  fg=sph_color,
-                  bg=row_bg,
-                  width=7,
-                  anchor="e",
-              )
-              sph_lbl.pack(side="right", padx=4)
-              sph_lbl.bind("<Button-3>", self.show_timer_context_menu)
-              sph_lbl.bind("<Double-Button-1>", lambda e: self.toggle_game_mode_double_click())
+      row_bg = (
+          TRANS_COLOR
+          if is_topmost
+          else ("#181818" if row_idx % 2 == 0 else "#1e1e1e")
+      )
+
+      row_frame = tk.Frame(self.sr_splits_container, bg=row_bg, padx=8, pady=6)
+      row_frame.pack(fill="x", pady=1)
+      row_frame.bind("<Button-3>", self.show_timer_context_menu)
+      row_frame.bind("<Double-Button-1>", lambda e: self.toggle_game_mode_double_click())
+
+      name_lbl = tk.Label(
+          row_frame,
+          text=split["name"],
+          font=(current_font, 11, "normal"),
+          fg=accent_hex,
+          bg=row_bg,
+          width=12,
+          anchor="w",
+      )
+      name_lbl.pack(side="left")
+      name_lbl.bind("<Button-3>", self.show_timer_context_menu)
+      name_lbl.bind("<Double-Button-1>", lambda e: self.toggle_game_mode_double_click())
+
+      if split["completed"]:
+        t_str = self.format_time(split["total_time"])
+      else:
+        t_str = (
+            self.format_time(split["pb_total"])
+            if actual_idx >= self.current_split_index
+            else "--"
+        )
+
+      time_lbl = tk.Label(
+          row_frame,
+          text=t_str,
+          font=(current_font, 10, "bold"),
+          fg="#ffffff",
+          bg=row_bg,
+          width=12,
+          anchor="e",
+      )
+      time_lbl.pack(side="right")
+      time_lbl.bind("<Button-3>", self.show_timer_context_menu)
+      time_lbl.bind("<Double-Button-1>", lambda e: self.toggle_game_mode_double_click())
+
+      if split["completed"]:
+        d_str = split.get("delta_str", "")
+      elif actual_idx == self.current_split_index and getattr(self, "timer_running", False):
+        prev_total = (
+            self.splits_list[actual_idx - 1]["total_time"]
+            if actual_idx > 0
+            else 0.0
+        )
+        live_seg_elapsed = current_elapsed - prev_total
+        prev_pb_total = (
+            self.splits_list[actual_idx - 1]["pb_total"]
+            if actual_idx > 0
+            else 0.0
+        )
+        pb_seg = split["pb_total"] - prev_pb_total
+        live_delta = live_seg_elapsed - pb_seg
+        d_str = self.format_delta(live_delta)
+      else:
+        d_str = ""
+
+      d_fg = "#55ff55" if d_str.startswith("-") else "#ff5555"
+      delta_lbl = tk.Label(
+          row_frame,
+          text=d_str,
+          font=(current_font, 9),
+          fg=d_fg,
+          bg=row_bg,
+          width=7,
+          anchor="e",
+      )
+      delta_lbl.pack(side="right", padx=6)
+      delta_lbl.bind("<Button-3>", self.show_timer_context_menu)
+      delta_lbl.bind("<Double-Button-1>", lambda e: self.toggle_game_mode_double_click())
+
+      if split["completed"]:
+        seg_str = self.format_time_short(split["segment_time"])
+        seg_fg = "#aaaaaa"
+      else:
+        prev_pb_total = (
+            self.splits_list[actual_idx - 1]["pb_total"]
+            if actual_idx > 0
+            else 0.0
+        )
+        pb_seg = split["pb_total"] - prev_pb_total
+        seg_str = self.format_time_short(pb_seg)
+        seg_fg = "#666666" if actual_idx > self.current_split_index else "#ffffff"
+
+      seg_lbl = tk.Label(
+          row_frame,
+          text=seg_str,
+          font=(current_font, 9),
+          fg=seg_fg,
+          bg=row_bg,
+          width=8,
+          anchor="e",
+      )
+      seg_lbl.pack(side="right")
+      seg_lbl.bind("<Button-3>", self.show_timer_context_menu)
+      seg_lbl.bind("<Double-Button-1>", lambda e: self.toggle_game_mode_double_click())
+
+      if show_sph:
+        sph_str = ""
+        sph_color = "#55ff55"
+        if split["completed"] and split["segment_time"] is not None:
+          match = re.search(r"\d+", split["name"])
+          raw_r = int(match.group()) if match else (actual_idx + 2)
+          r_num = max(1, raw_r - 1)
+          zombies = self.get_zombies_for_round(r_num, int(self.players_spin.get() if hasattr(self, "players_spin") else 1))
+          hordes = zombies / 24.0
+          if hordes > 0:
+            sph_val = split["segment_time"] / hordes
+
+            display_min = 4.8
+            display_max = 100.0
+            grad_min = 4.8
+            grad_max = 30.0
+
+            if sph_val < display_min or sph_val > display_max:
+              sph_str = "--"
+              sph_color = "#aaaaaa"
+            else:
+              sph_str = f"{sph_val:.1f}"
+              clamped_val = max(grad_min, min(grad_max, sph_val))
+              t = (clamped_val - grad_min) / (grad_max - grad_min)
+
+              if t < 0.5:
+                r_col = int(255 * (t / 0.5))
+                g_col = 255
+              else:
+                r_col = 255
+                g_col = int(255 * (1.0 - (t - 0.5) / 0.5))
+
+              sph_color = f"#{r_col:02x}{g_col:02x}00"
+
+        sph_lbl = tk.Label(
+            row_frame,
+            text=sph_str,
+            font=(current_font, 9, "bold"),
+            fg=sph_color,
+            bg=row_bg,
+            width=7,
+            anchor="e",
+        )
+        sph_lbl.pack(side="right", padx=4)
+        sph_lbl.bind("<Button-3>", self.show_timer_context_menu)
+        sph_lbl.bind("<Double-Button-1>", lambda e: self.toggle_game_mode_double_click())
 
   def sr_split_action(self):
       now = time.time()
@@ -6385,7 +7448,7 @@ class ZombiesTrackerApp:
               )
               pb_seg = split["pb_total"] - prev_pb_total
               delta = seg_time - pb_seg
-              split["delta_str"] = f"+{delta:.1f}" if delta >= 0 else f"{delta:.1f}"
+              split["delta_str"] = self.format_delta(delta)
 
               self.current_split_index += 1
               if self.current_split_index >= len(self.splits_list):
@@ -6482,21 +7545,16 @@ class ZombiesTrackerApp:
                       )
                       pb_seg = active_split["pb_total"] - prev_pb_total
                       live_delta = seg_elapsed - pb_seg
-                      d_str = f"+{live_delta:.1f}" if live_delta >= 0 else f"{live_delta:.1f}"
+                      d_str = self.format_delta(live_delta)
                       d_fg = "#55ff55" if d_str.startswith("-") else "#ff5555"
 
                   try:
                       self.sr_total_time_lbl.config(text=t_str)
                       self.sr_current_seg_lbl.config(text=seg_str)
                       
-                      if active_split:
-                          for row_frame in self.sr_splits_container.winfo_children():
-                              children = row_frame.winfo_children()
-                              if len(children) >= 3:
-                                  name_lbl = children[0]
-                                  if name_lbl.cget("text") == active_split.get("name", ""):
-                                      children[2].config(text=d_str, fg=d_fg)
-                                      break
+                      if hasattr(self, "active_row_canvas") and self.active_row_canvas and self.active_row_canvas.winfo_exists():
+                          if hasattr(self, "active_delta_text_id") and self.active_delta_text_id:
+                              self.active_row_canvas.itemconfigure(self.active_delta_text_id, text=d_str, fill=d_fg)
                   except Exception:
                       pass
 
@@ -6565,15 +7623,16 @@ class ZombiesTrackerApp:
       self.rebuild_sr_splits_ui()
 
   def format_time(self, seconds):
-      if seconds is None:
-          return "--"
-      m = int(seconds // 60)
-      s = seconds % 60
-      return (
-          f"{m:02d}:{s:05.2f}"
-          if m < 60
-          else f"{int(m//60)}:{m%60:02d}:{s:05.2f}"
-      )
+    if seconds is None:
+      return "--"
+    total_seconds = int(seconds)
+    h = total_seconds // 3600
+    m = (total_seconds % 3600) // 60
+    s = seconds % 60
+    if h > 0:
+      return f"{h}:{m:02d}:{s:05.2f}"
+    else:
+      return f"{m:02d}:{s:05.2f}"
 
   def format_time_long(self, seconds):
       h = int(seconds // 3600)
@@ -6595,11 +7654,23 @@ class ZombiesTrackerApp:
       else:
           return f"{s:04.1f}"
 
+  def format_delta(self, seconds):
+      if seconds is None:
+          return ""
+      sign = "+" if seconds >= 0 else "-"
+      abs_sec = abs(seconds)
+      m = int(abs_sec // 60)
+      s = abs_sec % 60
+      if m > 0:
+          return f"{sign}{m}:{s:04.1f}"
+      else:
+          return f"{sign}{s:04.1f}"
+
   def update_speedrun_ui(self):
       accent_hex = self.get_accent_hex()
       self.sr_start_btn.config(bg=accent_hex)
       self.sr_total_time_lbl.config(fg=accent_hex)
-      self.sr_current_seg_lbl.config(fg=accent_hex)
+      self.sr_current_seg_lbl.config(fg="#ffffff")
       self.rebuild_sr_splits_ui()
 
 
