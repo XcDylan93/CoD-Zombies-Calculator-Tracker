@@ -17,7 +17,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from PIL import Image, ImageTk
 
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 
 if getattr(sys, "frozen", False):
   base_dir = os.path.dirname(os.path.abspath(sys.executable))
@@ -536,8 +536,6 @@ class ZombiesTrackerApp:
     self.calculate_zombies()
     self.calculate_bonus_round()
     self.calculate_boss_round()
-
-    threading.Thread(target=self.game_round_auto_detect_loop, daemon=True).start()
 
     self.root.after(1000, self.check_for_updates)
     self.start_timer_loop()
@@ -6854,6 +6852,19 @@ class ZombiesTrackerApp:
             self._bo1_offset = 0
             self._old_round_change = None
             self._old_ticks = ticks_val
+            
+            def reset_calc_round():
+              if hasattr(self, "round_entry") and self.round_entry.winfo_exists():
+                curr = self.round_entry.get().strip()
+                if curr != "1":
+                  self.round_entry.delete(0, tk.END)
+                  self.round_entry.insert(0, "1")
+                  self.calculate_zombies()
+            try:
+              self.root.after(0, reset_calc_round)
+            except Exception:
+              pass
+
             self.root.after(
                 0,
                 lambda: [
@@ -6889,6 +6900,20 @@ class ZombiesTrackerApp:
 
               self._old_round_change = round_change_val
 
+          derived_bo1_round = max(1, (self._bo1_step - 1 - self._bo1_offset))
+          if is_timer_running and 1 <= derived_bo1_round <= 255:
+            def sync_bo1_calc_round(r=derived_bo1_round):
+              if hasattr(self, "round_entry") and self.round_entry.winfo_exists():
+                curr = self.round_entry.get().strip()
+                if curr != str(r):
+                  self.round_entry.delete(0, tk.END)
+                  self.round_entry.insert(0, str(r))
+                  self.calculate_zombies()
+            try:
+              self.root.after(0, sync_bo1_calc_round)
+            except Exception:
+              pass
+
           self._old_ticks = ticks_val
 
           game_time_sec = (ticks_val * 50) / 1000.0
@@ -6923,6 +6948,19 @@ class ZombiesTrackerApp:
               round_val = abs_val
             else:
               round_val = 0
+
+          if 1 <= round_val <= 255:
+            def sync_calc_round(r=round_val):
+              if hasattr(self, "round_entry") and self.round_entry.winfo_exists():
+                curr = self.round_entry.get().strip()
+                if curr != str(r):
+                  self.round_entry.delete(0, tk.END)
+                  self.round_entry.insert(0, str(r))
+                  self.calculate_zombies()
+            try:
+              self.root.after(0, sync_calc_round)
+            except Exception:
+              pass
 
           level_time_val = reader.read_int32(base_addr + profile["level_time"])
           if level_time_val is None:
@@ -6987,100 +7025,6 @@ class ZombiesTrackerApp:
 
     if reader:
       reader.close()
-
-  def game_round_auto_detect_loop(self):
-    process_list = [
-        ("blackops3.exe", "bo3"),
-        ("boiii.exe", "bo3"),
-        ("blackops.exe", "bo1"),
-        ("bgamert5.exe", "bo1"),
-    ]
-    
-    reader = MemoryReader("blackops3.exe")
-    self._last_game_memory_round = -1
-    
-    while True:
-      try:
-        if not reader.h_process:
-          attached = False
-          for proc_name, game_type in process_list:
-            reader.process_name = proc_name
-            if reader.attach():
-              attached = True
-              print(f"[RoundAutoDetect] Attached to {game_type} ({proc_name})")
-              break
-          
-          if not attached:
-            if not getattr(self, "user_changed_round_manually", False):
-              def set_one():
-                if hasattr(self, "round_entry") and self.round_entry.winfo_exists():
-                  if self.round_entry.focus_get() != self.round_entry:
-                    curr = self.round_entry.get().strip()
-                    if curr != "1":
-                      self.round_entry.delete(0, tk.END)
-                      self.round_entry.insert(0, "1")
-                      self.calculate_zombies()
-              try:
-                self.root.after(0, set_one)
-              except Exception:
-                pass
-            time.sleep(2.0)
-            continue
-
-        base_addr = reader.get_module_base(reader.process_name)
-        if base_addr == 0:
-          base_addr = reader.get_module_base("blackops3.exe" if "3" in reader.process_name else "blackops.exe")
-        if base_addr == 0:
-          base_addr = 0x140000000 if "3" in reader.process_name else 0x00400000
-
-        if "3" in reader.process_name:
-          round_val = reader.read_int32(base_addr + 0xA55BDEC)
-          if round_val is None or round_val < 0 or round_val > 255:
-            abs_val = reader.read_int32(0xA55BDEC)
-            round_val = abs_val if (abs_val is not None and 0 <= abs_val <= 255) else 0
-        else:
-          round_val = 0
-
-        if round_val != self._last_game_memory_round:
-          self._last_game_memory_round = round_val
-          self.user_changed_round_manually = False
-
-          if 1 <= round_val <= 255:
-            def update_round(r=round_val):
-              if hasattr(self, "round_entry") and self.round_entry.winfo_exists():
-                if self.round_entry.focus_get() != self.round_entry:
-                  self.round_entry.delete(0, tk.END)
-                  self.round_entry.insert(0, str(r))
-                  self.calculate_zombies()
-            try:
-              self.root.after(0, update_round)
-            except Exception:
-              pass
-          else:
-            if not getattr(self, "user_changed_round_manually", False):
-              def set_one():
-                if hasattr(self, "round_entry") and self.round_entry.winfo_exists():
-                  if self.round_entry.focus_get() != self.round_entry:
-                    curr = self.round_entry.get().strip()
-                    if curr != "1":
-                      self.round_entry.delete(0, tk.END)
-                      self.round_entry.insert(0, "1")
-                      self.calculate_zombies()
-              try:
-                self.root.after(0, set_one)
-              except Exception:
-                pass
-
-      except Exception as e:
-        print(f"[RoundAutoDetect] Error: {e}")
-        try:
-          if reader:
-            reader.close()
-        except Exception:
-          pass
-        time.sleep(2.0)
-
-      time.sleep(0.5)
 
   def sr_generate_splits(self):
     target = 255
